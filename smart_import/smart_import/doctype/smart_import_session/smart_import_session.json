@@ -1,0 +1,128 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "format:IMP-{####}",
+ "creation": "2026-06-10 10:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "status",
+  "source_file",
+  "column_break_counts",
+  "imported_count",
+  "failed_count",
+  "skipped_count",
+  "section_internal",
+  "spec",
+  "plan",
+  "issues",
+  "progress",
+  "log"
+ ],
+ "fields": [
+  {
+   "default": "Draft",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Draft\nProfiled\nValidated\nImporting\nCompleted\nPartial\nFailed"
+  },
+  {
+   "fieldname": "source_file",
+   "fieldtype": "Attach",
+   "in_list_view": 1,
+   "label": "Source File"
+  },
+  {
+   "fieldname": "column_break_counts",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "imported_count",
+   "fieldtype": "Int",
+   "label": "Imported",
+   "read_only": 1
+  },
+  {
+   "fieldname": "failed_count",
+   "fieldtype": "Int",
+   "label": "Failed",
+   "read_only": 1
+  },
+  {
+   "fieldname": "skipped_count",
+   "fieldtype": "Int",
+   "label": "Skipped",
+   "read_only": 1
+  },
+  {
+   "collapsible": 1,
+   "fieldname": "section_internal",
+   "fieldtype": "Section Break",
+   "label": "Internal Data"
+  },
+  {
+   "fieldname": "spec",
+   "fieldtype": "Code",
+   "label": "Mapping Spec",
+   "options": "JSON",
+   "read_only": 1
+  },
+  {
+   "fieldname": "plan",
+   "fieldtype": "Code",
+   "label": "Plan",
+   "options": "JSON",
+   "read_only": 1
+  },
+  {
+   "fieldname": "issues",
+   "fieldtype": "Code",
+   "label": "Issues",
+   "options": "JSON",
+   "read_only": 1
+  },
+  {
+   "fieldname": "progress",
+   "fieldtype": "Code",
+   "label": "Progress",
+   "options": "JSON",
+   "read_only": 1
+  },
+  {
+   "fieldname": "log",
+   "fieldtype": "Code",
+   "label": "Log",
+   "options": "JSON",
+   "read_only": 1
+  }
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-06-10 10:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Smart Import",
+ "name": "Smart Import Session",
+ "naming_rule": "Expression",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

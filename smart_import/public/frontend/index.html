@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/assets/smart_import/logo.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Smart Import</title>
+    <script type="module" crossorigin src="/assets/smart_import/frontend/assets/index-CcVvelBx.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/smart_import/frontend/assets/index-DEb2ErkK.css">
+  </head>
+  <body>
+    <div id="app"></div>
+  
+          <script>
+              {% for key in boot %}
+              window["{{ key }}"] = {{ boot[key] | tojson }};
+              {% endfor %}
+          </script>
+          </body>
+          
+</html>
