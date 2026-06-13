@@ -422,7 +422,8 @@ const fieldsResource = createResource({ url: 'smart_import.api.doctype_fields' }
 async function ensureFields(dt) {
   if (fieldsByDoctype[dt]) return
   const data = await fieldsResource.submit({ doctype: dt })
-  setFields(dt, data)
+  // doctype_fields returns { parent, children }; the picker uses the parent list
+  setFields(dt, Array.isArray(data) ? data : data.parent || [])
 }
 function setFields(dt, fields) {
   fieldsByDoctype[dt] = fields
