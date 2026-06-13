@@ -130,21 +130,20 @@ def child_tables(doctype):
 
 
 def all_importable_doctypes():
-    """Every doctype a user could import into — app-agnostic.
+    """Every doctype on the site a user could import into — app-agnostic.
 
-    Excludes child tables, single doctypes, and ones the user can't create.
+    Lists all doctypes (including custom ones), excluding only those that can't
+    hold imported records: child tables, single doctypes, and virtual doctypes
+    (no real table). Also drops any the user lacks create permission on, since
+    the import couldn't insert them anyway.
     """
     rows = frappe.get_all(
         "DocType",
-        filters={"istable": 0, "issingle": 0},
-        fields=["name"],
+        filters={"istable": 0, "issingle": 0, "is_virtual": 0},
+        pluck="name",
         order_by="name asc",
     )
-    out = []
-    for r in rows:
-        if frappe.has_permission(r.name, "create"):
-            out.append(r.name)
-    return out
+    return [dt for dt in rows if frappe.has_permission(dt, "create")]
 
 
 INTERNAL_FIELDS = {
