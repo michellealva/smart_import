@@ -7,7 +7,12 @@ description = "Friendly, smart data import for Frappe apps"
 requires-python = ">=3.10"
 readme = "README.md"
 dynamic = ["version"]
-dependencies = []
+# Frappe already ships both, but declare them so smart_import installs cleanly
+# onto any bench and stays robust if the framework ever drops them.
+dependencies = [
+    "openpyxl",
+    "python-dateutil",
+]
 
 [build-system]
 requires = ["flit_core >=3.4,<4"]

@@ -65,14 +65,85 @@ def cell(row, idx):
     return row[idx]
 
 
+def _group_rows(sheet, idx, group_key):
+    """Group a flattened sheet's rows into one parent record each.
+
+    Rows sharing the same (case-insensitive) value in `group_key` become one
+    group, in first-seen order. Rows with a blank key — or no key column — each
+    become their own group, so nothing is silently merged.
+    """
+    gi = idx.get(group_key) if group_key else None
+    groups = []
+    pos = {}
+    blank = 0
+    for n, row in enumerate(sheet["rows"], start=2):
+        kv = cell(row, gi) if gi is not None else None
+        ks = str(kv).strip().lower() if kv is not None else ""
+        if ks:
+            key = ks
+        else:
+            key = "\x00blank{}".format(blank)
+            blank += 1
+        if key not in pos:
+            pos[key] = len(groups)
+            groups.append((key, []))
+        groups[pos[key]][1].append((n, row))
+    return groups
+
+
+def column_value_counts(sheet, idx, column):
+    """{distinct value -> rows it appears in} for a column, deduped
+    case-insensitively (so 'Contract sent' and 'Contract Sent' are one value)."""
+    counts = {}  # lowercased -> count
+    seen = {}  # lowercased -> first-seen original casing
+    i = idx.get(column)
+    for row in sheet["rows"]:
+        v = cell(row, i)
+        if v in (None, ""):
+            continue
+        s = str(v).strip()
+        if not s:
+            continue
+        k = s.lower()
+        counts[k] = counts.get(k, 0) + 1
+        seen.setdefault(k, s)
+    return {seen[k]: counts[k] for k in counts}
+
+
 # ---------------------------------------------------------------- validate
+
+
+def linkable_values_in_sheets(spec, data, target):
+    """Lowercased values present in any sheet that maps to `target`.
+
+    Those records will exist after import, so a reference matching one of them
+    is fine — even if the record doesn't exist in the site yet.
+    """
+    sheets = {s["name"]: s for s in data["sheets"]}
+    out = set()
+    for e in spec["entities"]:
+        if e["doctype"] != target or e["sheet"] not in sheets:
+            continue
+        for row in sheets[e["sheet"]]["rows"]:
+            for v in row:
+                if v in (None, ""):
+                    continue
+                s = str(v).strip().lower()
+                if s:
+                    out.add(s)
+    return out
+
+
+def _field_key(c):
+    """Disambiguate a column's field across parent and child tables."""
+    tf = c.get("table_fieldname")
+    return "{}.{}".format(tf, c["field"]) if tf else c["field"]
 
 
 def validate(spec, data):
     sheets = {s["name"]: s for s in data["sheets"]}
     issues = []
     entity_reports = []
-    imported_doctypes = {e["doctype"] for e in spec["entities"] if e["doctype"]}
 
     for e in spec["entities"]:
         if not e["doctype"] or e["sheet"] not in sheets:
@@ -80,7 +151,8 @@ def validate(spec, data):
         sheet = sheets[e["sheet"]]
         idx = col_index_for(sheet)
         meta = frappe.get_meta(e["doctype"])
-        mapped_fields = {c["field"] for c in e["columns"]}
+        # required-field check applies to parent fields only
+        mapped_fields = {c["field"] for c in e["columns"] if c.get("target") != "child"}
 
         # 1. required fields not present in the file
         missing_required = []
@@ -111,61 +183,111 @@ def validate(spec, data):
                 }
             )
 
-        # 2. link values that don't exist yet
+        # 2. link values that don't exist yet, and 3. dropdown values that
+        #    aren't valid options — both surfaced as per-value pickers.
+        checked_fields = set()
         for c in e["columns"]:
+            # one issue per field, even if two columns map to it (parent and a
+            # child field can share a fieldname, so key by table too)
+            fkey = _field_key(c)
+            if fkey in checked_fields:
+                continue
+            checked_fields.add(fkey)
             target = c.get("link_doctype")
-            if not target:
-                continue
-            # if another sheet in this same file creates these records,
-            # they'll exist by the time this sheet imports
-            if target in imported_doctypes and target != e["doctype"]:
-                continue
 
-            i = idx.get(c["column"])
-            values = set()
-            for row in sheet["rows"]:
-                v = cell(row, i)
-                if v not in (None, ""):
-                    s = str(v).strip()
-                    if s:
-                        values.add(s)
-            if not values:
-                continue
-
-            link_map = load_link_map(target)
-            keys = list(link_map.keys())
-            missing = []
-            for v in sorted(values):
-                k = v.lower()
-                if k in link_map:
+            if target:
+                counts = column_value_counts(sheet, idx, c["column"])
+                if not counts:
                     continue
-                if keys and get_close_matches(k, keys, n=1, cutoff=0.92):
-                    continue
-                missing.append(v)
+                link_map = load_link_map(target)
+                # values that another sheet in this file will create count as
+                # "will exist" — but only the values actually present there, so
+                # typos that match nothing (existing OR sheet) still get caught.
+                will_exist = linkable_values_in_sheets(spec, data, target)
+                keys = list(link_map.keys()) + list(will_exist)
+                missing = []
+                for v in sorted(counts):
+                    k = v.lower()
+                    if k in link_map or k in will_exist:
+                        continue
+                    if keys and get_close_matches(k, keys, n=1, cutoff=0.92):
+                        continue
+                    missing.append(v)
 
-            if missing:
+                if missing:
+                    issues.append(
+                        {
+                            "id": "{}:{}:missing_links".format(e["id"], fkey),
+                            "entity": e["id"],
+                            "sheet": e["sheet"],
+                            "type": "link_values",
+                            "severity": "action",
+                            "column": c["column"],
+                            "field": c["field"],
+                            "table_fieldname": c.get("table_fieldname"),
+                            "fieldtype": "Link",
+                            "target_doctype": target,
+                            "count": len(missing),
+                            "message": (
+                                '{} value(s) in column "{}" don\'t exist yet as {} records.'
+                            ).format(len(missing), c["column"], target),
+                            "choices": [
+                                {"label": "Create automatically", "value": "__create__"},
+                                {"label": "Leave blank", "value": "__blank__"},
+                                {"label": "Skip these rows", "value": "__skip__"},
+                                {"label": "Type a value…", "value": "__manual__"},
+                            ],
+                            "values": [
+                                {"value": v, "count": counts[v], "suggestion": "__create__"}
+                                for v in missing[:MAX_ISSUE_VALUES]
+                            ],
+                        }
+                    )
+                continue
+
+            if c.get("fieldtype") == "Select":
+                options = c.get("select_options") or []
+                if not options:
+                    continue
+                opt_lower = {o.strip().lower(): o for o in options}
+                counts = column_value_counts(sheet, idx, c["column"])
+                bad = [v for v in sorted(counts) if v.strip().lower() not in opt_lower]
+                if not bad:
+                    continue
+
+                values_payload = []
+                for v in bad[:MAX_ISSUE_VALUES]:
+                    close = get_close_matches(
+                        v.strip().lower(), list(opt_lower.keys()), n=1, cutoff=0.6
+                    )
+                    suggestion = opt_lower[close[0]] if close else "__blank__"
+                    values_payload.append(
+                        {"value": v, "count": counts[v], "suggestion": suggestion}
+                    )
+
                 issues.append(
                     {
-                        "id": "{}:{}:missing_links".format(e["id"], c["field"]),
+                        "id": "{}:{}:bad_options".format(e["id"], fkey),
                         "entity": e["id"],
                         "sheet": e["sheet"],
-                        "type": "missing_links",
+                        "type": "select_values",
                         "severity": "action",
                         "column": c["column"],
                         "field": c["field"],
-                        "target_doctype": target,
-                        "count": len(missing),
-                        "values": missing[:8],
-                        "all_values": missing[:MAX_ISSUE_VALUES],
+                        "table_fieldname": c.get("table_fieldname"),
+                        "fieldtype": "Select",
+                        "count": len(bad),
                         "message": (
-                            '{} value(s) in column "{}" don\'t exist yet as {} records.'
-                        ).format(len(missing), c["column"], target),
-                        "options": [
-                            {"label": "Create them for me", "value": "create"},
-                            {"label": "Leave that field empty", "value": "blank"},
-                            {"label": "Skip those rows", "value": "skip"},
+                            '{} value(s) in column "{}" aren\'t valid options for {}.'
+                        ).format(len(bad), c["column"], c.get("label") or c["field"]),
+                        # dropdowns only accept their defined options — no free
+                        # text, since the user chose to keep dropdowns fixed.
+                        "choices": [{"label": o, "value": o} for o in options]
+                        + [
+                            {"label": "Leave blank", "value": "__blank__"},
+                            {"label": "Skip these rows", "value": "__skip__"},
                         ],
-                        "default": "create",
+                        "values": values_payload,
                     }
                 )
 
@@ -266,34 +388,85 @@ def create_link_record(doctype, value):
         return None
 
 
-def resolve_link(value, target, link_maps, policy):
-    m = link_maps[target]
+def _match_existing(m, value):
+    """Find an existing record by exact or close (fuzzy) match. None if absent."""
     key = str(value).strip().lower()
     if not key:
         return None
     if key in m:
         return m[key]
-
     close = get_close_matches(key, list(m.keys()), n=1, cutoff=0.92)
-    if close:
-        return m[close[0]]
+    return m[close[0]] if close else None
 
-    if policy == "blank":
-        return None
-    if policy == "skip":
-        raise SkipRow(
-            '"{}" doesn\'t exist in {} — row skipped as you chose.'.format(
-                value, target
-            )
-        )
-    # default: create
+
+def _create_link(target, value, link_maps, created_counts):
     name = create_link_record(target, value)
     if name:
-        m[key] = name
+        link_maps[target][str(value).strip().lower()] = name
+        created_counts[target] = created_counts.get(target, 0) + 1
+    return name
+
+
+def resolve_link_cell(raw, col, link_maps, vd, created_counts):
+    """Resolve a Link cell, honouring the user's per-value decision."""
+    target = col["link_doctype"]
+    link_maps.setdefault(target, load_link_map(target))
+    m = link_maps[target]
+
+    existing = _match_existing(m, raw)
+    if existing:
+        return existing
+
+    choice = vd.get(str(raw).strip().lower())
+    if choice == "__blank__":
+        return None
+    if choice == "__skip__":
+        raise SkipRow(
+            '"{}" doesn\'t exist in {} — row skipped as you chose.'.format(raw, target)
+        )
+
+    # __create__ or no decision -> create from the original value
+    if choice in (None, "__create__", ""):
+        name = _create_link(target, raw, link_maps, created_counts)
+        if name:
+            return name
+        raise ValueError('Could not find or create "{}" in {}.'.format(raw, target))
+
+    # otherwise the choice is a literal replacement (chosen record or typed)
+    replacement = str(choice).strip()
+    existing = _match_existing(m, replacement)
+    if existing:
+        return existing
+    name = _create_link(target, replacement, link_maps, created_counts)
+    if name:
         return name
-    raise ValueError(
-        'Could not find or create "{}" in {}.'.format(value, target)
-    )
+    raise ValueError('Could not find or create "{}" in {}.'.format(replacement, target))
+
+
+def resolve_select_cell(raw, col, vd):
+    """Resolve a Select cell, honouring the user's per-value decision."""
+    options = col.get("select_options") or []
+    opt_lower = {o.strip().lower(): o for o in options}
+    s = str(raw).strip()
+
+    if s.lower() in opt_lower:
+        return opt_lower[s.lower()]
+
+    choice = vd.get(s.lower())
+    if choice in ("__blank__", None, ""):
+        return None
+    if choice == "__skip__":
+        raise SkipRow(
+            '"{}" isn\'t a valid option for {} — row skipped as you chose.'.format(
+                raw, col["label"]
+            )
+        )
+
+    # a chosen option or a manually typed value
+    replacement = str(choice).strip()
+    if replacement.lower() in opt_lower:
+        return opt_lower[replacement.lower()]
+    return replacement
 
 
 def set_progress(session, payload):
@@ -309,7 +482,7 @@ def set_progress(session, payload):
 
 def run_import(session, decisions=None):
     """Background job: the actual import."""
-    from smart_import.engine import reader
+    from smart_import.engine import reader, urls
 
     decisions = decisions or {}
     doc = frappe.get_doc("Smart Import Session", session)
@@ -326,35 +499,24 @@ def run_import(session, decisions=None):
         sheets = {s["name"]: s for s in data["sheets"]}
 
         link_maps = {}
-        policies = {}
+        created_counts = {}
 
-        # Step 1 — handle "missing link" decisions up front
+        # Step 1 — collect the user's per-value decisions for each flagged field.
+        # value_decisions[(entity_id, field)] = {value_lower: choice}, where a
+        # choice is a sentinel (__create__/__blank__/__skip__) or a literal
+        # replacement value (a chosen option/record, or a manually typed value).
+        value_decisions = {}
         for iid, issue in issues.items():
-            if issue.get("type") != "missing_links":
+            if issue.get("type") not in ("link_values", "select_values"):
                 continue
-            action = decisions.get(iid) or issue.get("default") or "create"
-            policies[(issue["entity"], issue["field"])] = action
-            if action == "create":
-                target = issue["target_doctype"]
-                link_maps.setdefault(target, load_link_map(target))
-                created = 0
-                for v in issue.get("all_values") or []:
-                    if str(v).strip().lower() in link_maps[target]:
-                        continue
-                    name = create_link_record(target, v)
-                    if name:
-                        link_maps[target][str(v).strip().lower()] = name
-                        created += 1
-                if created:
-                    log.append(
-                        {
-                            "type": "info",
-                            "message": "Created {} new {} record(s) from column \"{}\".".format(
-                                created, target, issue["column"]
-                            ),
-                        }
-                    )
-        frappe.db.commit()
+            key = (issue["entity"], issue.get("table_fieldname"), issue["field"])
+            vd = value_decisions.setdefault(key, {})
+            for val, choice in (decisions.get(iid) or {}).items():
+                vd[str(val).strip().lower()] = choice
+            # fall back to the suggested choice for values the user left untouched
+            for entry in issue.get("values", []):
+                v = str(entry["value"]).strip().lower()
+                vd.setdefault(v, entry.get("suggestion"))
 
         # Step 2 — import each sheet in dependency order
         active = [
@@ -368,58 +530,113 @@ def run_import(session, decisions=None):
             sheet = sheets[e["sheet"]]
             idx = col_index_for(sheet)
             own_title = get_title_fieldname(e["doctype"])
+            parent_cols = [c for c in e["columns"] if c.get("target") != "child"]
+            child_cols = [c for c in e["columns"] if c.get("target") == "child"]
 
             for col in e["columns"]:
                 t = col.get("link_doctype")
                 if t and t not in link_maps:
                     link_maps[t] = load_link_map(t)
 
-            for n, row in enumerate(sheet["rows"], start=2):
+            def resolve_one(col, raw):
+                """Turn a raw cell into a stored value, honouring user decisions."""
+                vd = value_decisions.get(
+                    (e["id"], col.get("table_fieldname"), col["field"]), {}
+                )
+                if col.get("link_doctype"):
+                    return resolve_link_cell(raw, col, link_maps, vd, created_counts)
+                if col.get("fieldtype") == "Select":
+                    return resolve_select_cell(raw, col, vd)
+                return coerce(col, raw)
+
+            def is_blank(raw):
+                return raw is None or (isinstance(raw, str) and not raw.strip())
+
+            def register_link(rec):
+                # later sheets may link to this record
+                if e["doctype"] in link_maps:
+                    link_maps[e["doctype"]][str(rec.name).strip().lower()] = rec.name
+                    if own_title and rec.get(own_title):
+                        link_maps[e["doctype"]][
+                            str(rec.get(own_title)).strip().lower()
+                        ] = rec.name
+
+            def log_created(rec):
+                log.append(
+                    {
+                        "type": "created",
+                        "doctype": e["doctype"],
+                        "name": rec.name,
+                        "sheet": e["sheet"],
+                        "route": urls.record_url(e["doctype"], rec.name),
+                    }
+                )
+
+            # group flattened rows into one parent record each, or import row-by-row
+            if child_cols:
+                groups = _group_rows(sheet, idx, e.get("group_key") or "")
+            else:
+                groups = [(None, [(n, row)]) for n, row in enumerate(sheet["rows"], start=2)]
+
+            for _key, grows in groups:
+                first_n = grows[0][0]
                 frappe.db.savepoint(SAVEPOINT)
                 try:
                     values = {"doctype": e["doctype"]}
-                    for col in e["columns"]:
-                        raw = cell(row, idx.get(col["column"]))
-                        if raw is None or (
-                            isinstance(raw, str) and not raw.strip()
-                        ):
+                    # parent fields: first non-empty cell across the group's rows
+                    for col in parent_cols:
+                        ci = idx.get(col["column"])
+                        raw = next(
+                            (
+                                cell(r, ci)
+                                for _, r in grows
+                                if not is_blank(cell(r, ci))
+                            ),
+                            None,
+                        )
+                        if is_blank(raw):
                             continue
-                        if col.get("link_doctype"):
-                            policy = policies.get(
-                                (e["id"], col["field"]), "create"
-                            )
-                            v = resolve_link(
-                                raw, col["link_doctype"], link_maps, policy
-                            )
-                        else:
-                            v = coerce(col, raw)
+                        v = resolve_one(col, raw)
                         if v is not None:
                             values[col["field"]] = v
+
+                    # child rows: one line per source row, grouped by table field
+                    tables = {}
+                    for _, r in grows:
+                        per_table = {}
+                        skip_line = False
+                        for col in child_cols:
+                            raw = cell(r, idx.get(col["column"]))
+                            if is_blank(raw):
+                                continue
+                            try:
+                                v = resolve_one(col, raw)
+                            except SkipRow:
+                                skip_line = True  # "skip these rows" drops the whole line
+                                break
+                            if v is not None:
+                                per_table.setdefault(col["table_fieldname"], {})[
+                                    col["field"]
+                                ] = v
+                        if skip_line:
+                            continue
+                        for tf, d in per_table.items():
+                            if d:
+                                tables.setdefault(tf, []).append(d)
+                    for tf, rows_list in tables.items():
+                        values[tf] = rows_list
 
                     rec = frappe.get_doc(values)
                     rec.insert()
                     imported += 1
-
-                    # later sheets may link to this record
-                    if e["doctype"] in link_maps:
-                        link_maps[e["doctype"]][
-                            str(rec.name).strip().lower()
-                        ] = rec.name
-                        if own_title and rec.get(own_title):
-                            link_maps[e["doctype"]][
-                                str(rec.get(own_title)).strip().lower()
-                            ] = rec.name
+                    log_created(rec)
+                    register_link(rec)
 
                 except SkipRow as ex:
                     frappe.db.rollback(save_point=SAVEPOINT)
                     skipped += 1
                     log.append(
-                        {
-                            "type": "skipped",
-                            "sheet": e["sheet"],
-                            "row": n,
-                            "message": str(ex),
-                        }
+                        {"type": "skipped", "sheet": e["sheet"], "row": first_n, "message": str(ex)}
                     )
                 except frappe.DuplicateEntryError:
                     frappe.db.rollback(save_point=SAVEPOINT)
@@ -428,7 +645,7 @@ def run_import(session, decisions=None):
                         {
                             "type": "skipped",
                             "sheet": e["sheet"],
-                            "row": n,
+                            "row": first_n,
                             "message": "A record with the same identity already exists — skipped.",
                         }
                     )
@@ -436,16 +653,11 @@ def run_import(session, decisions=None):
                     frappe.db.rollback(save_point=SAVEPOINT)
                     failed += 1
                     log.append(
-                        {
-                            "type": "error",
-                            "sheet": e["sheet"],
-                            "row": n,
-                            "message": str(ex)[:300],
-                        }
+                        {"type": "error", "sheet": e["sheet"], "row": first_n, "message": str(ex)[:300]}
                     )
 
-                done += 1
-                if done % 25 == 0:
+                done += len(grows)
+                if done % 25 < len(grows):
                     set_progress(
                         session,
                         {
@@ -459,6 +671,17 @@ def run_import(session, decisions=None):
                     )
 
             frappe.db.commit()
+
+        for target, n in created_counts.items():
+            log.insert(
+                0,
+                {
+                    "type": "info",
+                    "message": "Created {} new {} record(s) automatically.".format(
+                        n, target
+                    ),
+                },
+            )
 
         status = "Completed" if failed == 0 else ("Partial" if imported else "Failed")
         set_progress(
