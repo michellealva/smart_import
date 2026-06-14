@@ -1,20 +1,12 @@
 <template>
-  <div class="mx-auto max-w-5xl px-4 py-8">
-    <!-- Header -->
-    <div class="mb-6 flex items-center justify-between">
-      <div class="flex items-center gap-3">
-        <img :src="logoUrl" alt="" class="h-9 w-9 rounded-lg" />
-        <div>
-          <h1 class="text-lg font-semibold text-gray-900">Smart Import</h1>
-          <p class="text-sm text-gray-600">Bring your spreadsheet data in, without the headache</p>
-        </div>
-      </div>
-      <router-link
-        to="/past"
-        class="text-sm text-gray-600 hover:text-gray-900 hover:underline"
-        >Past imports</router-link
-      >
-    </div>
+  <div class="mx-auto max-w-5xl px-4 pb-10">
+    <PageHeader title="Smart Import" subtitle="Bring your spreadsheet data in, without the headache">
+      <template #action>
+        <router-link to="/past" class="text-sm text-gray-600 hover:text-gray-900 hover:underline"
+          >Past imports</router-link
+        >
+      </template>
+    </PageHeader>
 
     <!-- Step indicator -->
     <div class="mb-6 flex items-center gap-2 text-sm">
@@ -516,9 +508,9 @@ import {
   LoadingIndicator,
   createResource,
 } from 'frappe-ui'
+import PageHeader from '../components/PageHeader.vue'
 
 const stepLabels = ['Upload', 'Review', 'Fix issues', 'Import']
-const logoUrl = '/assets/smart_import/logo.svg'
 
 const step = ref(1)
 const session = ref(null)
