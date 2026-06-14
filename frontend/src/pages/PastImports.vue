@@ -1,22 +1,12 @@
 <template>
   <div class="mx-auto max-w-5xl px-4 pb-10">
-    <!-- Header (sticky so the title + New import stay reachable on a long history) -->
-    <div
-      class="sticky top-0 z-10 -mx-4 mb-8 flex items-center justify-between border-b border-gray-200 bg-gray-50/90 px-4 py-5 backdrop-blur-sm"
-    >
-      <div class="flex items-center gap-3">
-        <img :src="logoUrl" alt="" class="h-9 w-9 rounded-lg" />
-        <div>
-          <h1 class="text-lg font-semibold text-gray-900">Past imports</h1>
-          <p class="text-sm text-gray-600">A history of the files you've brought in</p>
-        </div>
-      </div>
-      <router-link
-        to="/"
-        class="text-sm text-gray-600 hover:text-gray-900 hover:underline"
-        >New import</router-link
-      >
-    </div>
+    <PageHeader title="Past imports" subtitle="A history of the files you've brought in">
+      <template #action>
+        <router-link to="/" class="text-sm text-gray-600 hover:text-gray-900 hover:underline"
+          >New import</router-link
+        >
+      </template>
+    </PageHeader>
 
     <!-- Loading -->
     <div
@@ -128,8 +118,8 @@
 <script setup>
 import { computed, reactive, ref } from 'vue'
 import { ErrorMessage, FeatherIcon, LoadingIndicator, createResource } from 'frappe-ui'
+import PageHeader from '../components/PageHeader.vue'
 
-const logoUrl = '/assets/smart_import/logo.svg'
 const errorMessage = ref('')
 
 const expanded = reactive({})

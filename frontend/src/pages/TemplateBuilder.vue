@@ -1,15 +1,15 @@
 <template>
-  <div class="mx-auto max-w-5xl px-4 py-8">
-    <!-- Header strip -->
-    <div class="mb-6 flex items-center justify-between">
-      <div class="flex items-center gap-3">
-        <img :src="logoUrl" alt="" class="h-8 w-8 rounded-lg" />
-        <h1 class="text-lg font-semibold text-gray-900">Get a spreadsheet to fill in</h1>
-      </div>
-      <router-link to="/" class="text-sm text-gray-600 hover:text-gray-900 hover:underline"
-        >Back to import</router-link
-      >
-    </div>
+  <div class="mx-auto max-w-5xl px-4 pb-10">
+    <PageHeader
+      title="Get a spreadsheet to fill in"
+      subtitle="Download a ready-made workbook, fill it in, then import it back"
+    >
+      <template #action>
+        <router-link to="/" class="text-sm text-gray-600 hover:text-gray-900 hover:underline"
+          >Back to import</router-link
+        >
+      </template>
+    </PageHeader>
 
     <!-- pick a doctype (always visible — builder reveals below) -->
     <div class="mb-6 rounded-xl border border-gray-200 bg-white p-5">
@@ -176,7 +176,7 @@
 
       <!-- RIGHT: workbook summary -->
       <div class="w-full shrink-0 lg:w-80">
-        <div class="sticky top-8 rounded-xl border border-gray-200 bg-white p-5">
+        <div class="sticky top-24 rounded-xl border border-gray-200 bg-white p-5">
           <div class="mb-1 flex items-center gap-2 text-sm font-semibold text-gray-900">
             <FeatherIcon name="file-text" class="h-4 w-4 text-gray-400" /> Your workbook
           </div>
@@ -320,8 +320,8 @@ import {
   TabButtons,
   createResource,
 } from 'frappe-ui'
+import PageHeader from '../components/PageHeader.vue'
 
-const logoUrl = '/assets/smart_import/logo.svg'
 const errorMessage = ref('')
 
 const selectedDoctype = ref('')
