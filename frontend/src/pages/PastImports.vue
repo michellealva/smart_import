@@ -1,7 +1,7 @@
 <template>
-  <div class="mx-auto max-w-5xl px-4 py-8">
+  <div class="mx-auto max-w-5xl px-4 py-10">
     <!-- Header -->
-    <div class="mb-6 flex items-center justify-between">
+    <div class="mb-8 flex items-center justify-between">
       <div class="flex items-center gap-3">
         <img :src="logoUrl" alt="" class="h-9 w-9 rounded-lg" />
         <div>
@@ -42,10 +42,10 @@
     </div>
 
     <!-- List -->
-    <div v-else class="space-y-2">
+    <div v-else class="space-y-3">
       <div v-for="s in sessions" :key="s.name" class="rounded-lg border border-gray-200 bg-white">
         <button
-          class="flex w-full flex-wrap items-center gap-3 px-4 py-3 text-left"
+          class="flex w-full flex-wrap items-center gap-3 px-4 py-4 text-left"
           @click="toggleDetail(s.name)"
         >
           <div
@@ -59,7 +59,7 @@
               {{ statusLabel(s.status) }}
               <span class="font-normal text-gray-500">· {{ formatDate(s.modified) }}</span>
             </p>
-            <p class="text-xs text-gray-600">
+            <p class="mt-0.5 text-xs text-gray-600">
               {{ s.imported_count || 0 }} imported · {{ s.skipped_count || 0 }} skipped ·
               {{ s.failed_count || 0 }} failed
             </p>

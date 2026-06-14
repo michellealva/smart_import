@@ -65,6 +65,10 @@ def cell(row, idx):
     return row[idx]
 
 
+def is_blank(raw):
+    return raw is None or (isinstance(raw, str) and not raw.strip())
+
+
 def _group_rows(sheet, idx, group_key):
     """Group a flattened sheet's rows into one parent record each.
 
@@ -182,6 +186,76 @@ def validate(spec, data):
                     "options": [],
                 }
             )
+
+        # 1b. required fields that ARE mapped but left blank in some rows.
+        #     The column exists, so case 1 above won't catch it — but a blank
+        #     cell in a mandatory field would fail that record at insert time.
+        #     Surface it as a per-value picker (skip those rows, or fill a value).
+        required_labels = {
+            df.fieldname: (df.label or df.fieldname)
+            for df in meta.fields
+            if df.reqd
+            and not df.default
+            and df.fieldtype not in ("Table", "Table MultiSelect")
+            and not df.fetch_from
+        }
+        if required_labels:
+            has_child = any(c.get("target") == "child" for c in e["columns"])
+            if has_child:
+                groups = _group_rows(sheet, idx, e.get("group_key") or "")
+            else:
+                groups = [
+                    (None, [(n, row)])
+                    for n, row in enumerate(sheet["rows"], start=2)
+                ]
+            seen_required = set()
+            for c in e["columns"]:
+                if c.get("target") == "child":
+                    continue
+                label = required_labels.get(c["field"])
+                if not label or c["field"] in seen_required:
+                    continue
+                seen_required.add(c["field"])
+                ci = idx.get(c["column"])
+                # a parent field is blank for a group only when blank in every
+                # row of that group (the importer takes the first non-blank cell)
+                blank = sum(
+                    1
+                    for _k, grows in groups
+                    if all(is_blank(cell(r, ci)) for _, r in grows)
+                )
+                if not blank:
+                    continue
+                choices = []
+                if c.get("fieldtype") == "Select" and c.get("select_options"):
+                    choices += [
+                        {"label": o, "value": o} for o in c["select_options"]
+                    ]
+                choices += [
+                    {"label": "Skip those rows", "value": "__skip__"},
+                    {"label": "Type a value to use", "value": "__manual__"},
+                ]
+                issues.append(
+                    {
+                        "id": "{}:{}:missing_values".format(e["id"], _field_key(c)),
+                        "entity": e["id"],
+                        "sheet": e["sheet"],
+                        "type": "missing_values",
+                        "severity": "action",
+                        "column": c["column"],
+                        "field": c["field"],
+                        "table_fieldname": c.get("table_fieldname"),
+                        "fieldtype": c.get("fieldtype"),
+                        "count": blank,
+                        "message": (
+                            '{} row(s) have no value in "{}", but {} requires it.'
+                        ).format(blank, c["column"], label),
+                        "choices": choices,
+                        "values": [
+                            {"value": "", "count": blank, "suggestion": "__skip__"}
+                        ],
+                    }
+                )
 
         # 2. link values that don't exist yet, and 3. dropdown values that
         #    aren't valid options — both surfaced as per-value pickers.
@@ -507,7 +581,11 @@ def run_import(session, decisions=None):
         # replacement value (a chosen option/record, or a manually typed value).
         value_decisions = {}
         for iid, issue in issues.items():
-            if issue.get("type") not in ("link_values", "select_values"):
+            if issue.get("type") not in (
+                "link_values",
+                "select_values",
+                "missing_values",
+            ):
                 continue
             key = (issue["entity"], issue.get("table_fieldname"), issue["field"])
             vd = value_decisions.setdefault(key, {})
@@ -548,9 +626,6 @@ def run_import(session, decisions=None):
                 if col.get("fieldtype") == "Select":
                     return resolve_select_cell(raw, col, vd)
                 return coerce(col, raw)
-
-            def is_blank(raw):
-                return raw is None or (isinstance(raw, str) and not raw.strip())
 
             def register_link(rec):
                 # later sheets may link to this record
@@ -595,7 +670,23 @@ def run_import(session, decisions=None):
                             None,
                         )
                         if is_blank(raw):
-                            continue
+                            # honour the user's decision for a blank required
+                            # field (skip the row, or fill a chosen/typed value)
+                            vd = value_decisions.get(
+                                (e["id"], col.get("table_fieldname"), col["field"]),
+                                {},
+                            )
+                            choice = vd.get("")
+                            if choice == "__skip__":
+                                raise SkipRow(
+                                    'Row skipped — no value for required field "{}".'.format(
+                                        col.get("label") or col["field"]
+                                    )
+                                )
+                            if choice and choice not in ("__blank__", "__manual__"):
+                                raw = choice  # a chosen option or typed value
+                            else:
+                                continue
                         v = resolve_one(col, raw)
                         if v is not None:
                             values[col["field"]] = v
