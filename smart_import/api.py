@@ -302,7 +302,7 @@ def list_sessions(limit=50):
     if not has_app_permission():
         frappe.throw("Not permitted", frappe.PermissionError)
 
-    return frappe.get_all(
+    sessions = frappe.get_all(
         "Smart Import Session",
         filters={"status": ["!=", "Draft"]},
         fields=[
@@ -312,10 +312,30 @@ def list_sessions(limit=50):
             "failed_count",
             "skipped_count",
             "modified",
+            "owner",
         ],
         order_by="modified desc",
         limit=int(limit),
     )
+
+    # attach a friendly creator name (falls back to the user id / email)
+    owners = list({s.owner for s in sessions if s.owner})
+    names = (
+        dict(
+            frappe.get_all(
+                "User",
+                filters={"name": ["in", owners]},
+                fields=["name", "full_name"],
+                as_list=True,
+            )
+        )
+        if owners
+        else {}
+    )
+    for s in sessions:
+        s["owner_name"] = names.get(s.owner) or s.owner
+
+    return sessions
 
 
 @frappe.whitelist()

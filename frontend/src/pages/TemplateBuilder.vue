@@ -51,17 +51,22 @@
           <TabButtons v-model="view" :buttons="views" />
         </div>
 
-        <!-- STEPS view -->
-        <div v-if="view === 'steps'" class="space-y-3">
+        <!-- FILL ORDER view (timeline of tabs to fill, top to bottom) -->
+        <div v-if="view === 'steps'" class="relative space-y-3">
           <div
             v-for="(dt, i) in orderedTabs"
             :key="dt"
-            class="rounded-xl border bg-white"
+            class="relative rounded-xl border bg-white"
             :class="dt === selectedDoctype ? 'border-blue-300' : 'border-gray-200'"
           >
+            <!-- vertical connector to the next step -->
+            <span
+              v-if="i < orderedTabs.length - 1"
+              class="absolute left-[31px] top-[42px] -bottom-3 w-px bg-gray-200"
+            />
             <div class="flex items-start gap-3 px-4 py-3">
               <span
-                class="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-medium"
+                class="relative z-10 mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-xs font-medium"
                 :class="dt === selectedDoctype ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600'"
                 >{{ i + 1 }}</span
               >
@@ -106,63 +111,65 @@
           </Button>
         </div>
 
-        <!-- WORKBOOK TABS view -->
-        <div v-else-if="view === 'tabs'" class="space-y-2">
-          <div v-for="dt in orderedTabs" :key="dt" class="rounded-lg border border-gray-200 bg-white">
-            <button
-              class="flex w-full items-center justify-between px-4 py-2.5 text-left"
-              @click="toggleSection(dt)"
-            >
-              <span class="flex items-center gap-2 text-sm font-medium text-gray-900">
-                <FeatherIcon :name="isOpen(dt) ? 'chevron-down' : 'chevron-right'" class="h-3.5 w-3.5" />
-                {{ labelOf(dt) }}
-                <span v-if="dt === selectedDoctype" class="text-xs font-normal text-gray-500">· main</span>
-              </span>
-              <span class="text-xs text-gray-500">{{ columnCount(dt) }} columns</span>
-            </button>
-            <div v-if="isOpen(dt)" class="border-t border-gray-100 p-6">
-              <ColumnPicker :dt="dt" />
-            </div>
-          </div>
-        </div>
+        <!-- RELATIONSHIPS view (how records connect; add optional ones) -->
+        <div v-else class="rounded-xl border border-gray-200 bg-white p-5">
+          <p class="mb-4 text-sm text-gray-600">
+            How these records connect. Add any optional related records you also want to import —
+            required ones are already included.
+          </p>
 
-        <!-- CONNECTION MAP view -->
-        <div v-else class="rounded-xl border border-gray-200 bg-white p-4">
+          <!-- root: the record being imported (Espresso Badge, same as Fill order) -->
           <div class="flex items-center gap-2 text-sm font-semibold text-gray-900">
             <FeatherIcon name="target" class="h-4 w-4 text-blue-600" /> {{ rootLabel }}
-            <span class="text-xs font-normal text-gray-500">— the record you're importing</span>
+            <Badge theme="blue" label="Importing this" />
           </div>
-          <div
-            v-for="node in treeRows"
-            :key="node.doctype"
-            class="flex items-center gap-2 py-1 text-sm"
-            :style="{ paddingLeft: (node.depth + 1) * 20 + 'px' }"
-          >
-            <button
-              v-if="node.hasChildren"
-              class="text-gray-400 hover:text-gray-700"
-              @click="toggleTreeExpand(node.doctype)"
+
+          <!-- linked records, drawn as a connected tree -->
+          <div class="mt-1">
+            <div
+              v-for="node in treeRows"
+              :key="node.doctype"
+              class="relative flex items-center gap-2 py-1.5 text-sm"
+              :style="{ paddingLeft: (node.depth + 1) * 22 + 'px' }"
             >
-              <FeatherIcon
-                :name="treeExpanded[node.doctype] ? 'chevron-down' : 'chevron-right'"
-                class="h-3.5 w-3.5"
+              <!-- connector guides: a rail per depth level + an elbow into the node -->
+              <span
+                v-for="d in node.depth + 1"
+                :key="d"
+                class="absolute top-0 bottom-0 w-px bg-gray-200"
+                :style="{ left: d * 22 - 11 + 'px' }"
               />
-            </button>
-            <span v-else class="inline-block w-3.5 shrink-0" />
-            <span class="text-gray-400">{{ node.via_label }}</span>
-            <FeatherIcon name="arrow-right" class="h-3 w-3 shrink-0 text-gray-300" />
-            <span :class="includedSet.has(node.doctype) ? 'font-medium text-gray-900' : 'text-gray-600'">
-              {{ labelOf(node.doctype) }}
-            </span>
-            <Badge v-if="forcedSet.has(node.doctype)" theme="orange" label="required" />
-            <Button
-              v-else
-              size="sm"
-              :variant="includedSet.has(node.doctype) ? 'subtle' : 'outline'"
-              :theme="includedSet.has(node.doctype) ? 'green' : 'gray'"
-              :label="includedSet.has(node.doctype) ? 'Included' : 'Add'"
-              @click="toggleInclude(node.doctype)"
-            />
+              <FeatherIcon
+                name="corner-down-right"
+                class="-ml-1 h-3.5 w-3.5 shrink-0 text-gray-300"
+                :style="{ marginLeft: '-' + (node.depth * 22 + 4) + 'px' }"
+              />
+              <button
+                v-if="node.hasChildren"
+                class="text-gray-400 hover:text-gray-700"
+                @click="toggleTreeExpand(node.doctype)"
+              >
+                <FeatherIcon
+                  :name="treeExpanded[node.doctype] ? 'chevron-down' : 'chevron-right'"
+                  class="h-3.5 w-3.5"
+                />
+              </button>
+              <span class="text-xs text-gray-400">{{ node.via_label }}</span>
+              <span
+                :class="includedSet.has(node.doctype) ? 'font-medium text-gray-900' : 'text-gray-600'"
+              >
+                {{ labelOf(node.doctype) }}
+              </span>
+              <Badge v-if="forcedSet.has(node.doctype)" theme="orange" label="required" />
+              <Button
+                v-else
+                size="sm"
+                :variant="includedSet.has(node.doctype) ? 'subtle' : 'outline'"
+                :theme="includedSet.has(node.doctype) ? 'green' : 'gray'"
+                :label="includedSet.has(node.doctype) ? 'Included' : 'Add'"
+                @click="toggleInclude(node.doctype)"
+              />
+            </div>
           </div>
         </div>
       </div>
@@ -384,9 +391,8 @@ function onFilterField(f, v) {
 const downloading = ref(false)
 
 const views = [
-  { value: 'steps', label: 'Steps', icon: 'list' },
-  { value: 'tabs', label: 'Workbook tabs', icon: 'grid' },
-  { value: 'map', label: 'Connection map', icon: 'share-2' },
+  { value: 'steps', label: 'Fill order', icon: 'list' },
+  { value: 'map', label: 'Relationships', icon: 'share-2' },
 ]
 
 const modeOptions = [
