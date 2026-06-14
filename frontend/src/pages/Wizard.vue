@@ -93,15 +93,11 @@
               <p class="text-sm font-medium text-gray-900">
                 {{ entity.rows }} rows from sheet "{{ entity.sheet }}"
               </p>
-              <p class="text-xs text-gray-600" v-if="!childInfo(entity)">
+              <p class="text-xs text-gray-600" v-if="!usesChildTables(entity)">
                 <template v-if="entity.doctype">
-                  {{ entity.mapped }} columns recognized<template v-if="entity.unmapped.length"
-                    >, {{ entity.unmapped.length }} will be ignored ({{
-                      entity.unmapped.slice(0, 3).join(', ')
-                    }}<template v-if="entity.unmapped.length > 3">, ...</template>)</template
-                  >
-                  <template v-if="entity.links.length">
-                    · connects to {{ entity.links.join(', ') }}</template
+                  {{ entity.mapped }} column{{ entity.mapped === 1 ? '' : 's' }} mapped<template
+                    v-if="entity.unmapped.length"
+                    >, {{ entity.unmapped.length }} ignored</template
                   >
                 </template>
                 <template v-else>This sheet will be skipped</template>
@@ -117,8 +113,8 @@
             </div>
           </div>
 
-          <!-- grouped mapping: main record + each child table, shown plainly -->
-          <div v-if="childInfo(entity)" class="space-y-3 border-t border-gray-100 px-4 py-3">
+          <!-- grouped mapping: only when this import actually fills a child table -->
+          <div v-if="usesChildTables(entity)" class="space-y-3 border-t border-gray-100 px-4 py-3">
             <!-- Main record (parent) -->
             <div class="overflow-hidden rounded-lg border border-gray-200 bg-white">
               <div class="flex items-center gap-1.5 border-b border-gray-100 bg-gray-50 px-3 py-2">
@@ -704,6 +700,13 @@ function changeDoctype(entityId, doctype) {
 function childInfo(entity) {
   const f = entity.doctype ? fieldCache[entity.doctype] : null
   return f && f.children && f.children.length ? f : null
+}
+
+// Show the grouped (line-item) layout only when this import ACTUALLY maps
+// columns into a child table — not merely because the doctype defines one.
+// A flat sheet (one row = one record) gets the plain summary instead.
+function usesChildTables(entity) {
+  return !!childInfo(entity) && mappingGroups(entity).children.length > 0
 }
 
 function toggleCols(entityId) {
