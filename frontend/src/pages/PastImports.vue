@@ -1,7 +1,9 @@
 <template>
-  <div class="mx-auto max-w-5xl px-4 py-10">
-    <!-- Header -->
-    <div class="mb-8 flex items-center justify-between">
+  <div class="mx-auto max-w-5xl px-4 pb-10">
+    <!-- Header (sticky so the title + New import stay reachable on a long history) -->
+    <div
+      class="sticky top-0 z-10 -mx-4 mb-8 flex items-center justify-between border-b border-gray-200 bg-gray-50/90 px-4 py-5 backdrop-blur-sm"
+    >
       <div class="flex items-center gap-3">
         <img :src="logoUrl" alt="" class="h-9 w-9 rounded-lg" />
         <div>
@@ -62,6 +64,7 @@
             <p class="mt-0.5 text-xs text-gray-600">
               {{ s.imported_count || 0 }} imported · {{ s.skipped_count || 0 }} skipped ·
               {{ s.failed_count || 0 }} failed
+              <span v-if="s.owner_name" class="text-gray-400">· by {{ s.owner_name }}</span>
             </p>
           </div>
           <span class="shrink-0 rounded-full px-2 py-0.5 text-xs font-medium" :class="statusStyle(s.status).badge">
