@@ -307,14 +307,23 @@ def start_import(session, decisions=None):
 
 
 @frappe.whitelist()
-def list_sessions(limit=50):
-    """Recent imports, newest first — powers the in-app 'Past imports' page."""
+def list_sessions(limit=10, start=0):
+    """Recent imports, newest first — powers the in-app 'Past imports' page.
+
+    Paginated: returns {sessions, total, start, limit} so the page can show
+    `limit` (default 10) at a time with prev/next.
+    """
     if not has_app_permission():
         frappe.throw("Not permitted", frappe.PermissionError)
 
+    limit = int(limit)
+    start = int(start)
+    filters = {"status": ["!=", "Draft"]}
+    total = frappe.db.count("Smart Import Session", filters)
+
     sessions = frappe.get_all(
         "Smart Import Session",
-        filters={"status": ["!=", "Draft"]},
+        filters=filters,
         fields=[
             "name",
             "status",
@@ -325,7 +334,8 @@ def list_sessions(limit=50):
             "owner",
         ],
         order_by="modified desc",
-        limit=int(limit),
+        limit=limit,
+        limit_start=start,
     )
 
     # attach a friendly creator name (falls back to the user id / email)
@@ -345,7 +355,7 @@ def list_sessions(limit=50):
     for s in sessions:
         s["owner_name"] = names.get(s.owner) or s.owner
 
-    return sessions
+    return {"sessions": sessions, "total": total, "start": start, "limit": limit}
 
 
 @frappe.whitelist()

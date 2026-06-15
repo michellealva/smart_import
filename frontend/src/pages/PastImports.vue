@@ -118,6 +118,22 @@
       </div>
     </div>
 
+    <!-- pagination -->
+    <div
+      v-if="total > PAGE_SIZE"
+      class="mt-4 flex items-center justify-between text-sm text-gray-600"
+    >
+      <span>{{ rangeStart }}–{{ rangeEnd }} of {{ total }}</span>
+      <div class="flex items-center gap-2">
+        <Button label="Previous" :disabled="!hasPrev || sessionsResource.loading" @click="prevPage">
+          <template #prefix><FeatherIcon name="chevron-left" class="h-4 w-4" /></template>
+        </Button>
+        <Button label="Next" :disabled="!hasNext || sessionsResource.loading" @click="nextPage">
+          <template #suffix><FeatherIcon name="chevron-right" class="h-4 w-4" /></template>
+        </Button>
+      </div>
+    </div>
+
     <ErrorMessage class="mt-3" :message="errorMessage" />
   </div>
 </template>
@@ -125,7 +141,7 @@
 <script setup>
 import { computed, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ErrorMessage, FeatherIcon, LoadingIndicator, createResource } from 'frappe-ui'
+import { Button, ErrorMessage, FeatherIcon, LoadingIndicator, createResource } from 'frappe-ui'
 import PageHeader from '../components/PageHeader.vue'
 
 const router = useRouter()
@@ -161,9 +177,11 @@ async function toggleDetail(name) {
   }
 }
 
+const PAGE_SIZE = 10
+const start = ref(0)
+
 const sessionsResource = createResource({
   url: 'smart_import.api.list_sessions',
-  auto: true,
   onError(error) {
     errorMessage.value =
       (error && error.messages && error.messages.join(', ')) ||
@@ -172,7 +190,28 @@ const sessionsResource = createResource({
   },
 })
 
-const sessions = computed(() => sessionsResource.data || [])
+function loadPage() {
+  sessionsResource.submit({ limit: PAGE_SIZE, start: start.value })
+}
+loadPage()
+
+const sessions = computed(() => sessionsResource.data?.sessions || [])
+const total = computed(() => sessionsResource.data?.total || 0)
+const rangeStart = computed(() => (total.value ? start.value + 1 : 0))
+const rangeEnd = computed(() => Math.min(start.value + PAGE_SIZE, total.value))
+const hasPrev = computed(() => start.value > 0)
+const hasNext = computed(() => start.value + PAGE_SIZE < total.value)
+
+function prevPage() {
+  if (!hasPrev.value) return
+  start.value = Math.max(0, start.value - PAGE_SIZE)
+  loadPage()
+}
+function nextPage() {
+  if (!hasNext.value) return
+  start.value += PAGE_SIZE
+  loadPage()
+}
 
 function statusLabel(status) {
   const map = {

@@ -118,13 +118,16 @@ def column_value_counts(sheet, idx, column):
 
 
 def linkable_values_in_sheets(spec, data, target):
-    """Lowercased values present in any sheet that maps to `target`.
+    """{lowercased value -> first-seen original} for values present in any sheet
+    that maps to `target`.
 
-    Those records will exist after import, so a reference matching one of them
-    is fine — even if the record doesn't exist in the site yet.
+    Those records will exist after import, so a reference matching one of them is
+    fine — even if the record doesn't exist in the site yet. Returns a dict so
+    callers can both test membership (``k in result``) and recover the original
+    casing for a suggestion.
     """
     sheets = {s["name"]: s for s in data["sheets"]}
-    out = set()
+    out = {}
     for e in spec["entities"]:
         if e["doctype"] != target or e["sheet"] not in sheets:
             continue
@@ -132,9 +135,9 @@ def linkable_values_in_sheets(spec, data, target):
             for v in row:
                 if v in (None, ""):
                     continue
-                s = str(v).strip().lower()
+                s = str(v).strip()
                 if s:
-                    out.add(s)
+                    out.setdefault(s.lower(), s)
     return out
 
 
@@ -316,9 +319,15 @@ def validate(spec, data):
                 # values that another sheet in this file will create count as
                 # "will exist" — those records exist after import.
                 will_exist = linkable_values_in_sheets(spec, data, target)
-                existing_keys = list(link_map.keys())
+                # pool for "did you mean" suggestions: existing records AND the
+                # values a sibling sheet will create (so a typo of a just-added
+                # value is suggested too). key (lowercased) -> value to suggest.
+                suggest_pool = dict(link_map)
+                for lk, orig in will_exist.items():
+                    suggest_pool.setdefault(lk, orig)
+                pool_keys = list(suggest_pool.keys())
                 missing = []
-                suggested = {}  # value -> an existing record it's probably a typo of
+                suggested = {}  # value -> an existing/sibling value it's probably a typo of
                 for v in sorted(counts):
                     k = v.lower()
                     # only an EXACT (case-insensitive) match counts as "exists".
@@ -328,12 +337,12 @@ def validate(spec, data):
                         continue
                     missing.append(v)
                     close = (
-                        get_close_matches(k, existing_keys, n=1, cutoff=0.8)
-                        if existing_keys
+                        get_close_matches(k, pool_keys, n=1, cutoff=0.8)
+                        if pool_keys
                         else []
                     )
                     if close:
-                        suggested[v] = link_map[close[0]]
+                        suggested[v] = suggest_pool[close[0]]
 
                 if missing:
                     # only offer "Create automatically" for doctypes that can
@@ -541,17 +550,6 @@ def create_link_record(doctype, value):
         return None
 
 
-def _match_existing(m, value):
-    """Find an existing record by exact or close (fuzzy) match. None if absent."""
-    key = str(value).strip().lower()
-    if not key:
-        return None
-    if key in m:
-        return m[key]
-    close = get_close_matches(key, list(m.keys()), n=1, cutoff=0.92)
-    return m[close[0]] if close else None
-
-
 def _create_link(target, value, link_maps, created_counts):
     name = create_link_record(target, value)
     if name:
@@ -568,13 +566,15 @@ def resolve_link_cell(raw, col, link_maps, vd, created_counts):
 
     key = str(raw).strip().lower()
 
-    # 1. an exact (case-insensitive) match always wins — no decision needed
+    # 1. an exact (case-insensitive) match always wins — no decision needed.
+    #    Records created earlier in this import (e.g. by a sibling sheet) are in
+    #    `m` already via register_link, so they count as existing too.
     if key in m:
         return m[key]
 
-    # 2. if this value was flagged, honour the user's decision (or the suggested
-    #    fix) rather than silently fuzzy-guessing — a near-miss like "Machineryy"
-    #    only resolves to "Machinery" because the user (or our suggestion) said so
+    # 2. honour the user's explicit decision. We never silently fuzzy-guess or
+    #    auto-create: a value only becomes something else because the user (or
+    #    our pre-selected suggestion) chose it.
     choice = vd.get(key)
     if choice is not None and choice != "":
         if choice == "__blank__":
@@ -584,6 +584,7 @@ def resolve_link_cell(raw, col, link_maps, vd, created_counts):
                 '"{}" doesn\'t exist in {} — row skipped as you chose.'.format(raw, target)
             )
         if choice == "__create__":
+            # the one explicit create path (offered only for creatable doctypes)
             name = _create_link(target, raw, link_maps, created_counts)
             if name:
                 return name
@@ -591,29 +592,21 @@ def resolve_link_cell(raw, col, link_maps, vd, created_counts):
                 'Could not create "{}" as a {} record — that doctype needs more '
                 "than a name.".format(raw, target)
             )
-        # a literal replacement: a chosen existing record or a typed value
-        replacement = str(choice).strip()
-        existing = _match_existing(m, replacement)
-        if existing:
-            return existing
-        name = _create_link(target, replacement, link_maps, created_counts)
-        if name:
-            return name
+        # a literal replacement: a chosen existing record or a typed value — it
+        # must ACTUALLY exist (exact match). Typed values are not auto-created.
+        rkey = str(choice).strip().lower()
+        if rkey in m:
+            return m[rkey]
         raise ValueError(
-            'Could not create "{}" as a {} record — that doctype needs more than '
-            "a name.".format(replacement, target)
+            '"{}" doesn\'t exist in {}. Pick an existing record, create it, '
+            "leave it blank, or skip the row.".format(choice, target)
         )
 
-    # 3. no decision and no exact match — fall back to a fuzzy match, then create
-    fuzzy = _match_existing(m, raw)
-    if fuzzy:
-        return fuzzy
-    name = _create_link(target, raw, link_maps, created_counts)
-    if name:
-        return name
+    # 3. no decision and no exact match — the value doesn't exist. Don't fuzzy
+    #    and don't auto-create; surface it as an error.
     raise ValueError(
-        'Could not create "{}" as a {} record — that doctype needs more than '
-        "a name.".format(raw, target)
+        '"{}" doesn\'t exist in {}. Pick an existing record, create it, leave it '
+        "blank, or skip the row.".format(raw, target)
     )
 
 
@@ -742,8 +735,15 @@ def recheck(session, decisions=None):
     value_decisions = _collect_value_decisions(issues, decisions)
     link_maps = {}
     created_counts = {}
+    will_exist_cache = {}  # target -> lowercased values a sibling sheet will create
+    seen_names = {}  # doctype -> set of identity names already produced this run
     would_import = would_skip = 0
     problems = []
+
+    def _will_exist(target):
+        if target not in will_exist_cache:
+            will_exist_cache[target] = linkable_values_in_sheets(spec, data, target)
+        return will_exist_cache[target]
 
     active = [e for e in spec["entities"] if e["doctype"] and e["sheet"] in sheets]
     for e in active:
@@ -770,14 +770,16 @@ def recheck(session, decisions=None):
                 (_e["id"], col.get("table_fieldname"), col["field"]), {}
             )
             if col.get("link_doctype"):
-                # dry link resolution — mirrors resolve_link_cell (exact match,
-                # then the user's decision, then fuzzy) but never creates a record.
+                # dry link resolution — mirrors resolve_link_cell exactly: exact
+                # match (system OR a sibling sheet) → ok; else honour the decision;
+                # never fuzzy, never auto-create a typed value.
                 target = col["link_doctype"]
                 link_maps.setdefault(target, load_link_map(target))
                 m = link_maps[target]
+                will_exist = _will_exist(target)
                 key = str(raw).strip().lower()
-                if key in m:
-                    return m[key]
+                if key in m or key in will_exist:
+                    return m.get(key, str(raw).strip())
                 choice = vd.get(key)
                 if choice is not None and choice != "":
                     if choice == "__blank__":
@@ -790,10 +792,13 @@ def recheck(session, decisions=None):
                         )
                     if choice == "__create__":
                         return str(raw).strip()  # creatable target → would be created
-                    replacement = str(choice).strip()
-                    return _match_existing(m, replacement) or replacement
-                fuzzy = _match_existing(m, raw)
-                return fuzzy if fuzzy else str(raw).strip()
+                    rkey = str(choice).strip().lower()
+                    if rkey in m or rkey in will_exist:
+                        return m.get(rkey, str(choice).strip())
+                    raise ValueError(
+                        '"{}" doesn\'t exist in {}.'.format(choice, target)
+                    )
+                raise ValueError('"{}" doesn\'t exist in {}.'.format(raw, target))
             if col.get("fieldtype") == "Select":
                 val = resolve_select_cell(raw, col, vd)
                 opts = col.get("select_options") or []
@@ -842,8 +847,22 @@ def recheck(session, decisions=None):
                         "reason": "Still missing required: " + ", ".join(missing),
                     }
                 )
-            else:
-                would_import += 1
+                continue
+
+            # predict duplicates the import would skip: only when the doctype is
+            # named by a field (autoname "field:x") — series/hash names never clash
+            autoname = meta.autoname or ""
+            if autoname.startswith("field:"):
+                idfield = autoname.split(":", 1)[1]
+                name = values.get(idfield)
+                nkey = str(name).strip().lower() if name else ""
+                if nkey:
+                    seen = seen_names.setdefault(e["doctype"], set())
+                    if nkey in seen or frappe.db.exists(e["doctype"], name):
+                        would_skip += 1
+                        continue
+                    seen.add(nkey)
+            would_import += 1
 
     return {
         "ok": not problems,
