@@ -2,7 +2,7 @@
   <!-- Shared header chrome for every screen, so the logo/title sit in the exact
        same place and nothing jumps when navigating between pages. -->
   <div
-    class="sticky top-0 z-10 -mx-4 mb-6 flex items-center justify-between border-b border-gray-200 bg-gray-50/90 px-4 py-5 backdrop-blur-sm"
+    class="sticky top-0 z-30 -mx-4 mb-6 flex items-center justify-between border-b border-gray-200 bg-gray-50 px-4 py-5"
   >
     <div class="flex items-center gap-3">
       <img :src="logoUrl" alt="" class="h-9 w-9 rounded-lg" />
