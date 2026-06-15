@@ -408,6 +408,21 @@
             >
           </p>
         </div>
+
+        <div v-if="importStalled" class="mt-5 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+          <p class="text-sm text-gray-800">
+            This is taking longer than expected — the import job may not have started.
+          </p>
+          <Button
+            class="mt-2"
+            variant="solid"
+            :loading="startResource.loading"
+            label="Retry import"
+            @click="retryImport"
+          >
+            <template #prefix><FeatherIcon name="refresh-cw" class="h-4 w-4" /></template>
+          </Button>
+        </div>
       </template>
 
       <template v-else>
@@ -449,13 +464,13 @@
             Records created
             <span class="font-normal text-gray-500">· {{ liveStatus.created_count || createdRecords.length }}</span>
           </p>
-          <div class="max-h-64 divide-y divide-gray-100 overflow-y-auto rounded-lg border border-gray-200">
+          <div class="si-scroll max-h-64 divide-y divide-gray-100 overflow-y-auto rounded-lg border border-gray-200">
             <a
               v-for="(rec, i) in createdRecords"
               :key="i"
               :href="rec.route"
               target="_blank"
-              class="flex items-center justify-between gap-2 px-3 py-1.5 text-xs hover:bg-gray-50"
+              class="flex items-center justify-between gap-2 px-3 py-2 text-xs hover:bg-gray-50"
             >
               <span class="truncate text-gray-700">
                 <span class="text-gray-400">{{ rec.doctype }}</span> · {{ rec.name }}
@@ -472,14 +487,34 @@
         </div>
 
         <div v-if="visibleLog.length" class="mt-5">
-          <p class="mb-2 text-sm font-medium text-gray-900">Issues</p>
-          <div class="max-h-64 space-y-1 overflow-y-auto rounded-lg border border-gray-200 p-3">
-            <p v-for="(entry, i) in visibleLog" :key="i" class="text-xs text-gray-700">
-              <span v-if="entry.row" class="text-gray-500"
-                >{{ entry.sheet }} · row {{ entry.row }}:</span
-              >
-              {{ entry.message }}
-            </p>
+          <p class="mb-2 text-sm font-medium text-gray-900">
+            Issues <span class="font-normal text-gray-500">· {{ logCount }}</span>
+          </p>
+          <div class="si-scroll max-h-72 divide-y divide-gray-100 overflow-y-auto rounded-lg border border-gray-200">
+            <div v-for="(entry, i) in visibleLog" :key="i" class="px-3 py-2 text-xs leading-relaxed">
+              <p class="text-gray-700">
+                <span v-if="entry.row" class="text-gray-500"
+                  >{{ entry.sheet }} · row {{ entry.row }}: </span
+                ><span class="break-words">{{ logSummary(entry) }}</span>
+              </p>
+              <template v-if="logDetail(entry)">
+                <button
+                  class="mt-1 flex items-center gap-1 text-[11px] font-medium text-gray-500 hover:text-gray-800"
+                  @click="toggleLog(i)"
+                >
+                  <FeatherIcon
+                    :name="expandedLog[i] ? 'chevron-down' : 'chevron-right'"
+                    class="h-3 w-3"
+                  />
+                  {{ expandedLog[i] ? 'Hide details' : 'Show details' }}
+                </button>
+                <pre
+                  v-if="expandedLog[i]"
+                  class="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded bg-gray-50 p-2 font-mono text-[11px] leading-snug text-gray-600"
+                  >{{ logDetail(entry) }}</pre
+                >
+              </template>
+            </div>
           </div>
         </div>
 
@@ -493,7 +528,8 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import {
   Autocomplete,
   Button,
@@ -507,6 +543,7 @@ import {
 import PageHeader from '../components/PageHeader.vue'
 
 const stepLabels = ['Upload', 'Review', 'Fix issues', 'Import']
+const route = useRoute()
 
 const step = ref(1)
 const session = ref(null)
@@ -523,6 +560,10 @@ const openCols = reactive({}) // entity id -> column editor expanded?
 const liveStatus = ref({ status: '', progress: {}, imported: 0, failed: 0, skipped: 0, log: [] })
 const errorMessage = ref('')
 let pollTimer = null
+// surfaced when an import sits at "Importing" with no progress for too long —
+// usually the background job never ran (no worker / lost job), so offer a retry
+const importStalled = ref(false)
+let importStartedAt = 0
 
 // ---------- resources ----------
 const newSessionResource = createResource({ url: 'smart_import.api.new_session' })
@@ -626,8 +667,48 @@ const statusResource = createResource({
     liveStatus.value = data
     if (['Completed', 'Partial', 'Failed'].includes(data.status)) {
       stopPolling()
+      importStalled.value = false
+    } else if (
+      data.status === 'Importing' &&
+      !(data.progress && data.progress.done) &&
+      importStartedAt &&
+      Date.now() - importStartedAt > 20000
+    ) {
+      // 20s with zero rows processed → the job likely never started
+      importStalled.value = true
     }
   },
+})
+
+// Resume an existing session (opened from Past imports) at the step it left off,
+// so the user can carry on instead of starting over.
+async function resumeSession(name) {
+  session.value = name
+  try {
+    const st = await statusResource.submit({ session: name })
+    const status = (st && st.status) || statusResource.data?.status
+    if (status === 'Profiled') {
+      // left off in Review
+      await profileResource.submit({ session: name })
+    } else if (['Validated', 'Partial', 'Failed'].includes(status)) {
+      // ready-to-import, or a run to retry — rebuild plan (for Back) then issues
+      await profileResource.submit({ session: name })
+      await validateResource.submit({ session: name })
+    } else if (status === 'Importing') {
+      // resume a (possibly stuck) in-progress import and keep watching it
+      step.value = 4
+      startPolling()
+    } else {
+      // Completed or anything else — show the result screen
+      step.value = 4
+    }
+  } catch (e) {
+    showError(e)
+  }
+}
+
+onMounted(() => {
+  if (route.query.session) resumeSession(String(route.query.session))
 })
 
 // ---------- step 1 ----------
@@ -909,10 +990,21 @@ function startImport() {
 // ---------- step 4 ----------
 function startPolling() {
   stopPolling()
+  importStalled.value = false
+  importStartedAt = Date.now()
   pollTimer = setInterval(() => {
     statusResource.submit({ session: session.value })
   }, 1500)
   statusResource.submit({ session: session.value })
+}
+
+// Re-enqueue an import whose job never ran (worker was down / job was lost).
+function retryImport() {
+  importStalled.value = false
+  startResource.submit({
+    session: session.value,
+    decisions: JSON.stringify({ ...decisions }),
+  })
 }
 
 function stopPolling() {
@@ -947,6 +1039,29 @@ const finishedSubtitle = computed(() => {
 })
 
 const visibleLog = computed(() => (liveStatus.value.log || []).slice(0, 50))
+const logCount = computed(() => (liveStatus.value.log || []).length)
+const expandedLog = reactive({})
+function toggleLog(i) {
+  expandedLog[i] = !expandedLog[i]
+}
+// a message is "technical" if it's long or multi-line (e.g. a raw traceback from
+// an older run that stored it as the message rather than in `detail`)
+function isTechnical(m) {
+  return !!m && (m.length > 200 || m.includes('\n') || m.includes('Traceback'))
+}
+// plain-English line shown by default
+function logSummary(entry) {
+  if (entry.detail) return entry.message
+  if (isTechnical(entry.message)) return 'An unexpected error occurred during import.'
+  return entry.message
+}
+// the technical detail behind "Show details" (backend `detail`, or a legacy
+// traceback that was stored in `message`)
+function logDetail(entry) {
+  if (entry.detail) return entry.detail
+  if (isTechnical(entry.message)) return entry.message
+  return ''
+}
 const createdRecords = computed(() => liveStatus.value.created || [])
 
 function openApp() {
@@ -977,3 +1092,35 @@ function reset() {
 
 onBeforeUnmount(stopPolling)
 </script>
+
+<style scoped>
+/* Make these lists obviously scrollable. A soft shadow shows at the top/bottom
+   edge whenever there's more content and fades out at the ends (the white
+   "cover" gradients scroll with the content and uncover the shadow). Plus a
+   thin always-visible scrollbar, since macOS hides overlay scrollbars. */
+.si-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: #cbd5e1 transparent;
+  background:
+    linear-gradient(#ffffff 30%, rgba(255, 255, 255, 0)) center top,
+    linear-gradient(rgba(255, 255, 255, 0), #ffffff 70%) center bottom,
+    radial-gradient(farthest-side at 50% 0, rgba(15, 23, 42, 0.16), rgba(15, 23, 42, 0)) center top,
+    radial-gradient(farthest-side at 50% 100%, rgba(15, 23, 42, 0.16), rgba(15, 23, 42, 0)) center bottom;
+  background-repeat: no-repeat;
+  background-size: 100% 32px, 100% 32px, 100% 12px, 100% 12px;
+  background-attachment: local, local, scroll, scroll;
+}
+.si-scroll::-webkit-scrollbar {
+  width: 10px;
+  -webkit-appearance: none;
+}
+.si-scroll::-webkit-scrollbar-thumb {
+  background-color: #cbd5e1;
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.si-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+</style>

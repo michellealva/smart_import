@@ -38,7 +38,7 @@
       <div v-for="s in sessions" :key="s.name" class="rounded-lg border border-gray-200 bg-white">
         <button
           class="flex w-full flex-wrap items-center gap-3 px-4 py-4 text-left"
-          @click="toggleDetail(s.name)"
+          @click="openSession(s)"
         >
           <div
             class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
@@ -60,7 +60,14 @@
           <span class="shrink-0 rounded-full px-2 py-0.5 text-xs font-medium" :class="statusStyle(s.status).badge">
             {{ s.status }}
           </span>
+          <span
+            v-if="isResumable(s.status)"
+            class="flex shrink-0 items-center gap-1 text-xs font-medium text-gray-600"
+          >
+            Continue <FeatherIcon name="arrow-right" class="h-4 w-4" />
+          </span>
           <FeatherIcon
+            v-else
             :name="expanded[s.name] ? 'chevron-up' : 'chevron-down'"
             class="h-4 w-4 shrink-0 text-gray-400"
           />
@@ -117,10 +124,27 @@
 
 <script setup>
 import { computed, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { ErrorMessage, FeatherIcon, LoadingIndicator, createResource } from 'frappe-ui'
 import PageHeader from '../components/PageHeader.vue'
 
+const router = useRouter()
 const errorMessage = ref('')
+
+// A finished run (Completed) just expands to show its records; anything else
+// (Reviewing, Ready to import, Partial, Failed) reopens in the wizard so the
+// user can carry on from where they left off.
+function isResumable(status) {
+  return status !== 'Completed'
+}
+
+function openSession(s) {
+  if (isResumable(s.status)) {
+    router.push({ path: '/', query: { session: s.name } })
+  } else {
+    toggleDetail(s.name)
+  }
+}
 
 const expanded = reactive({})
 const detail = reactive({})
