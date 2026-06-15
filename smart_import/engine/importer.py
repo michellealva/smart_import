@@ -744,7 +744,17 @@ def run_import(session, decisions=None):
                     frappe.db.rollback(save_point=SAVEPOINT)
                     failed += 1
                     log.append(
-                        {"type": "error", "sheet": e["sheet"], "row": first_n, "message": str(ex)[:300]}
+                        {
+                            "type": "error",
+                            "sheet": e["sheet"],
+                            "row": first_n,
+                            # plain-English summary up front; full error tucked
+                            # into `detail` for the expandable view
+                            "message": str(ex).strip().splitlines()[0][:200]
+                            if str(ex).strip()
+                            else "This row could not be imported.",
+                            "detail": frappe.get_traceback(),
+                        }
                     )
 
                 done += len(grows)
@@ -789,7 +799,13 @@ def run_import(session, decisions=None):
     except Exception:
         frappe.db.rollback()
         status = "Failed"
-        log.append({"type": "error", "message": frappe.get_traceback()[-2000:]})
+        log.append(
+            {
+                "type": "error",
+                "message": "The import stopped unexpectedly before it could finish.",
+                "detail": frappe.get_traceback(),
+            }
+        )
 
     frappe.db.set_value(
         "Smart Import Session",
