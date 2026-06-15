@@ -375,14 +375,57 @@
         </div>
       </template>
 
+      <!-- Recheck result: a dry-run of the import with the current fixes applied -->
+      <div
+        v-if="recheckResult"
+        class="mt-4 rounded-lg border px-4 py-3"
+        :class="recheckResult.ok ? 'border-green-200 bg-green-50' : 'border-amber-200 bg-amber-50'"
+      >
+        <div class="flex items-start gap-2">
+          <FeatherIcon
+            :name="recheckResult.ok ? 'check-circle' : 'alert-triangle'"
+            class="mt-0.5 h-4 w-4 shrink-0"
+            :class="recheckResult.ok ? 'text-green-600' : 'text-amber-600'"
+          />
+          <div class="min-w-0 flex-1">
+            <p class="text-sm font-medium text-gray-900">
+              {{ recheckResult.ok ? 'All set — ready to import' : 'A few rows still need attention' }}
+            </p>
+            <p class="mt-0.5 text-xs text-gray-600">
+              {{ recheckResult.would_import }} will import · {{ recheckResult.would_skip }} skipped ·
+              {{ recheckResult.would_fail }} still failing
+            </p>
+            <div v-if="recheckResult.problems?.length" class="mt-2 space-y-1">
+              <p
+                v-for="(p, i) in recheckResult.problems"
+                :key="i"
+                class="text-xs text-gray-700"
+              >
+                <span class="text-gray-500">{{ p.sheet }} · row {{ p.row }}: </span>{{ p.reason }}
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="mt-5 flex justify-between">
         <Button label="Back" @click="step = 2" />
-        <Button
-          variant="solid"
-          :loading="startResource.loading"
-          :label="actionIssues.length ? 'Apply my choices and import' : 'Start import'"
-          @click="startImport"
-        />
+        <div class="flex items-center gap-2">
+          <Button
+            v-if="actionIssues.length"
+            :loading="recheckResource.loading"
+            label="Recheck"
+            @click="runRecheck"
+          >
+            <template #prefix><FeatherIcon name="check-square" class="h-4 w-4" /></template>
+          </Button>
+          <Button
+            variant="solid"
+            :loading="startResource.loading"
+            :label="actionIssues.length ? 'Apply my choices and import' : 'Start import'"
+            @click="startImport"
+          />
+        </div>
       </div>
       <ErrorMessage class="mt-3" :message="errorMessage" />
     </div>
@@ -549,6 +592,7 @@ const step = ref(1)
 const session = ref(null)
 const plan = ref({ entities: [], available_doctypes: [], order: [] })
 const issues = ref({ issues: [], entities: [] })
+const recheckResult = ref(null)
 const decisions = reactive({})
 const manualText = reactive({})
 const manualOn = reactive({})
@@ -638,6 +682,7 @@ const validateResource = createResource({
   onSuccess(data) {
     issues.value = data
     errorMessage.value = ''
+    recheckResult.value = null
     clearDecisions()
     for (const issue of data.issues || []) {
       if (issue.values && issue.values.length) {
@@ -660,6 +705,22 @@ const startResource = createResource({
   },
   onError: showError,
 })
+
+const recheckResource = createResource({
+  url: 'smart_import.api.recheck',
+  onSuccess(data) {
+    recheckResult.value = data
+    errorMessage.value = ''
+  },
+  onError: showError,
+})
+
+function runRecheck() {
+  recheckResource.submit({
+    session: session.value,
+    decisions: JSON.stringify({ ...decisions }),
+  })
+}
 
 const statusResource = createResource({
   url: 'smart_import.api.status',
@@ -952,6 +1013,7 @@ function choiceFor(issue, val) {
 }
 
 function onChoice(issue, val, v) {
+  recheckResult.value = null // fixes changed — last recheck is stale
   const k = mkey(issue, val)
   if (!decisions[issue.id]) decisions[issue.id] = {}
   if (v === '__manual__') {
@@ -968,6 +1030,7 @@ function isManual(issue, val) {
 }
 
 function onManual(issue, val, text) {
+  recheckResult.value = null // fixes changed — last recheck is stale
   const k = mkey(issue, val)
   manualText[k] = text
   if (!decisions[issue.id]) decisions[issue.id] = {}
