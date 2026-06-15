@@ -84,6 +84,25 @@ class TestImporterPure(unittest.TestCase):
         with self.assertRaises(importer.SkipRow):
             importer.resolve_link_cell("ghost@x", col, {"User": {}}, {"ghost@x": "__skip__"}, {})
 
+    def test_resolve_link_cell_strict_no_fuzzy_no_autocreate(self):
+        col = {"link_doctype": "User"}
+        m = {"real@x": "Real User"}
+        # exact (case-insensitive) match resolves
+        self.assertEqual(
+            importer.resolve_link_cell("real@x", col, {"User": dict(m)}, {}, {}), "Real User"
+        )
+        # a typed value that doesn't exist is NOT fuzzy-matched or created -> error
+        with self.assertRaises(ValueError):
+            importer.resolve_link_cell("Reallx", col, {"User": dict(m)}, {"reallx": "Reall User"}, {})
+        # no decision + unknown value -> error (no silent auto-create)
+        with self.assertRaises(ValueError):
+            importer.resolve_link_cell("ghost@x", col, {"User": dict(m)}, {}, {})
+        # an exact typed replacement resolves
+        self.assertEqual(
+            importer.resolve_link_cell("ghost@x", col, {"User": dict(m)}, {"ghost@x": "real@x"}, {}),
+            "Real User",
+        )
+
     def test_linkable_values_in_sheets(self):
         spec = {"entities": [{"id": "e0", "sheet": "User", "doctype": "User", "columns": []}]}
         data = {"sheets": [{"name": "User", "headers": ["Email"], "rows": [["loy@test.com"], ["x@y.com"]]}]}
@@ -174,6 +193,39 @@ class TestValidate(unittest.TestCase):
         }
         # referenced value exists neither in the site nor the sheet -> flagged
         self.assertTrue(self._issues(spec, data, "link_values"))
+
+    def test_missing_required_value_flagged(self):
+        # ToDo.description is mandatory with no default; a mapped-but-blank
+        # column should be flagged as a missing_values issue.
+        spec = self._spec([{"column": "Desc", "field": "description", "fieldtype": "Text Editor"}])
+        data = {"sheets": [{"name": "S", "headers": ["Desc"], "rows": [[""], [""]]}]}
+        mv = self._issues(spec, data, "missing_values")
+        self.assertTrue(mv)
+        self.assertEqual(mv[0]["count"], 2)
+
+    def test_link_exact_match_not_flagged(self):
+        spec = self._spec([{"column": "U", "field": "x", "fieldtype": "Link", "link_doctype": "User"}])
+        data = {"sheets": [{"name": "S", "headers": ["U"], "rows": [["Administrator"]]}]}
+        self.assertFalse(self._issues(spec, data, "link_values"))
+
+    def test_link_near_miss_flagged_with_suggestion(self):
+        # a near-miss of an existing record is flagged (not silently accepted),
+        # and the close existing record is offered as the suggestion
+        spec = self._spec([{"column": "U", "field": "x", "fieldtype": "Link", "link_doctype": "User"}])
+        data = {"sheets": [{"name": "S", "headers": ["U"], "rows": [["Administratorr"]]}]}
+        lv = self._issues(spec, data, "link_values")
+        self.assertTrue(lv)
+        sugg = {v["value"]: v["suggestion"] for v in lv[0]["values"]}
+        self.assertEqual(sugg.get("Administratorr"), "Administrator")
+
+
+# ------------------------------------------------- auto_creatable (needs site)
+class TestAutoCreatable(unittest.TestCase):
+    def test_user_not_creatable_role_is(self):
+        # User needs email + first_name + real validation -> not creatable from a name
+        self.assertFalse(importer.auto_creatable("User"))
+        # Role is creatable from just its name
+        self.assertTrue(importer.auto_creatable("Role"))
 
 
 # ----------------------------------------------------- template (needs site)
