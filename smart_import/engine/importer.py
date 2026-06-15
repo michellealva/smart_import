@@ -118,13 +118,16 @@ def column_value_counts(sheet, idx, column):
 
 
 def linkable_values_in_sheets(spec, data, target):
-    """Lowercased values present in any sheet that maps to `target`.
+    """{lowercased value -> first-seen original} for values present in any sheet
+    that maps to `target`.
 
-    Those records will exist after import, so a reference matching one of them
-    is fine — even if the record doesn't exist in the site yet.
+    Those records will exist after import, so a reference matching one of them is
+    fine — even if the record doesn't exist in the site yet. Returns a dict so
+    callers can both test membership (``k in result``) and recover the original
+    casing for a suggestion.
     """
     sheets = {s["name"]: s for s in data["sheets"]}
-    out = set()
+    out = {}
     for e in spec["entities"]:
         if e["doctype"] != target or e["sheet"] not in sheets:
             continue
@@ -132,9 +135,9 @@ def linkable_values_in_sheets(spec, data, target):
             for v in row:
                 if v in (None, ""):
                     continue
-                s = str(v).strip().lower()
+                s = str(v).strip()
                 if s:
-                    out.add(s)
+                    out.setdefault(s.lower(), s)
     return out
 
 
@@ -316,9 +319,15 @@ def validate(spec, data):
                 # values that another sheet in this file will create count as
                 # "will exist" — those records exist after import.
                 will_exist = linkable_values_in_sheets(spec, data, target)
-                existing_keys = list(link_map.keys())
+                # pool for "did you mean" suggestions: existing records AND the
+                # values a sibling sheet will create (so a typo of a just-added
+                # value is suggested too). key (lowercased) -> value to suggest.
+                suggest_pool = dict(link_map)
+                for lk, orig in will_exist.items():
+                    suggest_pool.setdefault(lk, orig)
+                pool_keys = list(suggest_pool.keys())
                 missing = []
-                suggested = {}  # value -> an existing record it's probably a typo of
+                suggested = {}  # value -> an existing/sibling value it's probably a typo of
                 for v in sorted(counts):
                     k = v.lower()
                     # only an EXACT (case-insensitive) match counts as "exists".
@@ -328,12 +337,12 @@ def validate(spec, data):
                         continue
                     missing.append(v)
                     close = (
-                        get_close_matches(k, existing_keys, n=1, cutoff=0.8)
-                        if existing_keys
+                        get_close_matches(k, pool_keys, n=1, cutoff=0.8)
+                        if pool_keys
                         else []
                     )
                     if close:
-                        suggested[v] = link_map[close[0]]
+                        suggested[v] = suggest_pool[close[0]]
 
                 if missing:
                     # only offer "Create automatically" for doctypes that can

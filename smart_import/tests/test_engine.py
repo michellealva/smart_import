@@ -218,6 +218,28 @@ class TestValidate(unittest.TestCase):
         sugg = {v["value"]: v["suggestion"] for v in lv[0]["values"]}
         self.assertEqual(sugg.get("Administratorr"), "Administrator")
 
+    def test_link_near_miss_suggests_sibling_sheet_value(self):
+        # a typo of a value ANOTHER sheet will create is suggested from that
+        # sibling sheet, not just from existing system records
+        sib = "smartimport-sibling@example.invalid"
+        typo = "smartimport-siblingg@example.invalid"
+        spec = {
+            "entities": [
+                {"id": "e0", "sheet": "Users", "doctype": "User", "columns": [{"column": "Email", "field": "email", "fieldtype": "Data"}]},
+                {"id": "e1", "sheet": "T", "doctype": "ToDo", "columns": [{"column": "U", "field": "x", "fieldtype": "Link", "link_doctype": "User"}]},
+            ]
+        }
+        data = {
+            "sheets": [
+                {"name": "Users", "headers": ["Email"], "rows": [[sib]]},
+                {"name": "T", "headers": ["U"], "rows": [[typo]]},
+            ]
+        }
+        lv = self._issues(spec, data, "link_values")
+        self.assertTrue(lv)
+        sugg = {v["value"]: v["suggestion"] for v in lv[0]["values"]}
+        self.assertEqual(sugg.get(typo), sib)
+
 
 # ------------------------------------------------- auto_creatable (needs site)
 class TestAutoCreatable(unittest.TestCase):
