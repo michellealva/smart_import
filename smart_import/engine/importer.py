@@ -314,24 +314,41 @@ def validate(spec, data):
                     continue
                 link_map = load_link_map(target)
                 # values that another sheet in this file will create count as
-                # "will exist" — but only the values actually present there, so
-                # typos that match nothing (existing OR sheet) still get caught.
+                # "will exist" — those records exist after import.
                 will_exist = linkable_values_in_sheets(spec, data, target)
-                keys = list(link_map.keys()) + list(will_exist)
+                existing_keys = list(link_map.keys())
                 missing = []
+                suggested = {}  # value -> an existing record it's probably a typo of
                 for v in sorted(counts):
                     k = v.lower()
+                    # only an EXACT (case-insensitive) match counts as "exists".
+                    # A near-miss like "Machineryy" vs "Machinery" is flagged, not
+                    # silently auto-corrected, so the user decides.
                     if k in link_map or k in will_exist:
                         continue
-                    if keys and get_close_matches(k, keys, n=1, cutoff=0.92):
-                        continue
                     missing.append(v)
+                    close = (
+                        get_close_matches(k, existing_keys, n=1, cutoff=0.8)
+                        if existing_keys
+                        else []
+                    )
+                    if close:
+                        suggested[v] = link_map[close[0]]
 
                 if missing:
                     # only offer "Create automatically" for doctypes that can
                     # actually be made from a value (not User, etc.)
                     creatable = auto_creatable(target, creatable_cache)
+                    # offer each likely-correct existing record as a "did you mean"
                     choices = []
+                    seen_sugg = set()
+                    for v in missing:
+                        name = suggested.get(v)
+                        if name and name not in seen_sugg:
+                            seen_sugg.add(name)
+                            choices.append(
+                                {"label": 'Use existing "{}"'.format(name), "value": name}
+                            )
                     if creatable:
                         choices.append(
                             {"label": "Create automatically", "value": "__create__"}
@@ -344,12 +361,19 @@ def validate(spec, data):
                     message = (
                         '{} value(s) in column "{}" don\'t exist yet as {} records.'
                     ).format(len(missing), c["column"], target)
-                    if not creatable:
+                    if suggested:
+                        message += " Some look like typos — check the suggested match."
+                    elif not creatable:
                         message += (
                             " {} can't be created automatically — pick an existing one,"
                             " leave blank, or skip those rows."
                         ).format(target)
-                    suggestion = "__create__" if creatable else "__blank__"
+
+                    def _suggest(v):
+                        if v in suggested:
+                            return suggested[v]  # default to the likely-correct record
+                        return "__create__" if creatable else "__blank__"
+
                     issues.append(
                         {
                             "id": "{}:{}:missing_links".format(e["id"], fkey),
@@ -367,7 +391,7 @@ def validate(spec, data):
                             "message": message,
                             "choices": choices,
                             "values": [
-                                {"value": v, "count": counts[v], "suggestion": suggestion}
+                                {"value": v, "count": counts[v], "suggestion": _suggest(v)}
                                 for v in missing[:MAX_ISSUE_VALUES]
                             ],
                         }
@@ -542,39 +566,54 @@ def resolve_link_cell(raw, col, link_maps, vd, created_counts):
     link_maps.setdefault(target, load_link_map(target))
     m = link_maps[target]
 
-    existing = _match_existing(m, raw)
-    if existing:
-        return existing
+    key = str(raw).strip().lower()
 
-    choice = vd.get(str(raw).strip().lower())
-    if choice == "__blank__":
-        return None
-    if choice == "__skip__":
-        raise SkipRow(
-            '"{}" doesn\'t exist in {} — row skipped as you chose.'.format(raw, target)
-        )
+    # 1. an exact (case-insensitive) match always wins — no decision needed
+    if key in m:
+        return m[key]
 
-    # __create__ or no decision -> create from the original value
-    if choice in (None, "__create__", ""):
-        name = _create_link(target, raw, link_maps, created_counts)
+    # 2. if this value was flagged, honour the user's decision (or the suggested
+    #    fix) rather than silently fuzzy-guessing — a near-miss like "Machineryy"
+    #    only resolves to "Machinery" because the user (or our suggestion) said so
+    choice = vd.get(key)
+    if choice is not None and choice != "":
+        if choice == "__blank__":
+            return None
+        if choice == "__skip__":
+            raise SkipRow(
+                '"{}" doesn\'t exist in {} — row skipped as you chose.'.format(raw, target)
+            )
+        if choice == "__create__":
+            name = _create_link(target, raw, link_maps, created_counts)
+            if name:
+                return name
+            raise ValueError(
+                'Could not create "{}" as a {} record — that doctype needs more '
+                "than a name.".format(raw, target)
+            )
+        # a literal replacement: a chosen existing record or a typed value
+        replacement = str(choice).strip()
+        existing = _match_existing(m, replacement)
+        if existing:
+            return existing
+        name = _create_link(target, replacement, link_maps, created_counts)
         if name:
             return name
         raise ValueError(
             'Could not create "{}" as a {} record — that doctype needs more than '
-            "a name.".format(raw, target)
+            "a name.".format(replacement, target)
         )
 
-    # otherwise the choice is a literal replacement (chosen record or typed)
-    replacement = str(choice).strip()
-    existing = _match_existing(m, replacement)
-    if existing:
-        return existing
-    name = _create_link(target, replacement, link_maps, created_counts)
+    # 3. no decision and no exact match — fall back to a fuzzy match, then create
+    fuzzy = _match_existing(m, raw)
+    if fuzzy:
+        return fuzzy
+    name = _create_link(target, raw, link_maps, created_counts)
     if name:
         return name
     raise ValueError(
         'Could not create "{}" as a {} record — that doctype needs more than '
-        "a name.".format(replacement, target)
+        "a name.".format(raw, target)
     )
 
 
@@ -731,28 +770,30 @@ def recheck(session, decisions=None):
                 (_e["id"], col.get("table_fieldname"), col["field"]), {}
             )
             if col.get("link_doctype"):
-                # dry link resolution — never actually creates a record. "Create
-                # automatically" is only offered for creatable targets, so an
-                # un-matched __create__/typed value is assumed to resolve.
+                # dry link resolution — mirrors resolve_link_cell (exact match,
+                # then the user's decision, then fuzzy) but never creates a record.
                 target = col["link_doctype"]
                 link_maps.setdefault(target, load_link_map(target))
                 m = link_maps[target]
-                existing = _match_existing(m, raw)
-                if existing:
-                    return existing
-                choice = vd.get(str(raw).strip().lower())
-                if choice == "__blank__":
-                    return None
-                if choice == "__skip__":
-                    raise SkipRow(
-                        '"{}" doesn\'t exist in {} — row skipped as you chose.'.format(
-                            raw, target
+                key = str(raw).strip().lower()
+                if key in m:
+                    return m[key]
+                choice = vd.get(key)
+                if choice is not None and choice != "":
+                    if choice == "__blank__":
+                        return None
+                    if choice == "__skip__":
+                        raise SkipRow(
+                            '"{}" doesn\'t exist in {} — row skipped as you chose.'.format(
+                                raw, target
+                            )
                         )
-                    )
-                if choice in (None, "__create__", ""):
-                    return str(raw).strip()
-                replacement = str(choice).strip()
-                return _match_existing(m, replacement) or replacement
+                    if choice == "__create__":
+                        return str(raw).strip()  # creatable target → would be created
+                    replacement = str(choice).strip()
+                    return _match_existing(m, replacement) or replacement
+                fuzzy = _match_existing(m, raw)
+                return fuzzy if fuzzy else str(raw).strip()
             if col.get("fieldtype") == "Select":
                 val = resolve_select_cell(raw, col, vd)
                 opts = col.get("select_options") or []

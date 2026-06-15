@@ -100,16 +100,45 @@
                     >, {{ entity.unmapped.length }} ignored</template
                   >
                 </template>
-                <template v-else>This sheet will be skipped</template>
+                <template v-else
+                  >We couldn't tell what this sheet is — pick a type, or it'll be skipped.</template
+                >
               </p>
             </div>
-            <div class="w-56 shrink-0">
-              <Autocomplete
-                :options="doctypeOptions"
-                :modelValue="doctypeModel(entity.doctype)"
-                placeholder="Search a doctype…"
-                @change="(opt) => changeDoctype(entity.id, opt ? opt.value : '')"
-              />
+            <!-- sheet → doctype: confirmation when we have a guess, picker only
+                 when unsure or when the user clicks Change -->
+            <div class="shrink-0">
+              <div
+                v-if="entity.doctype && !editingDoctype[entity.id]"
+                class="flex items-center gap-2 text-sm"
+              >
+                <span class="text-gray-600"
+                  >Importing as <span class="font-medium text-gray-900">{{ entity.doctype }}</span></span
+                >
+                <button
+                  class="text-gray-500 underline hover:text-gray-900"
+                  @click="editingDoctype[entity.id] = true"
+                >
+                  Change
+                </button>
+              </div>
+              <div v-else class="flex items-center gap-2">
+                <div class="w-56">
+                  <Autocomplete
+                    :options="doctypeOptions"
+                    :modelValue="doctypeModel(entity.doctype)"
+                    placeholder="Search a doctype…"
+                    @change="(opt) => onPickDoctype(entity.id, opt)"
+                  />
+                </div>
+                <button
+                  v-if="entity.doctype"
+                  class="text-sm text-gray-500 underline hover:text-gray-900"
+                  @click="editingDoctype[entity.id] = false"
+                >
+                  Cancel
+                </button>
+              </div>
             </div>
           </div>
 
@@ -835,6 +864,13 @@ function changeDoctype(entityId, doctype) {
     entity_id: entityId,
     doctype: doctype || '',
   })
+}
+
+// per-entity toggle: reveal the doctype picker when the user clicks "Change"
+const editingDoctype = reactive({})
+function onPickDoctype(entityId, opt) {
+  changeDoctype(entityId, opt ? opt.value : '')
+  editingDoctype[entityId] = false
 }
 
 // ---------- step 2: child-table (line item) mapping ----------
