@@ -10,10 +10,15 @@ from io import BytesIO
 
 import frappe
 from openpyxl import Workbook
+from openpyxl.comments import Comment
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
 from smart_import.engine import reader
+
+# value written in the marker column for every example row (any non-empty value
+# makes the reader skip the row; the text is just a human hint)
+SAMPLE_CELL = "example — delete row"
 from smart_import.engine.mapper import (
     SKIP_FIELDTYPES,
     child_tables,
@@ -253,12 +258,15 @@ def _apply_validations(ws, fields, offset, end_row, lookups):
 def _root_child_columns(root, child_map):
     """Selected line-item columns for the root sheet, flattened.
 
-    Returns [(table_fieldname, child_doctype, docfield, header)]. Each active
-    child table's required fields are force-included so a line is valid, and
-    headers use the "Table: Field" convention the importer recognizes.
+    Returns [(table_fieldname, child_doctype, docfield, header)]. Required and
+    grid-visible (in_list_view) fields are force-included — the latter so the
+    column shown in the line-item grid (e.g. the "Product" link) is always there,
+    not just a secondary text field. Headers use the "Table: Field" convention
+    the importer recognizes.
     """
     out = []
     targets = {ct["table_fieldname"]: ct for ct in child_tables(root)}
+    autofill_text = {"Data", "Small Text", "Text", "Long Text"}
     for tf, fieldnames in (child_map or {}).items():
         ct = targets.get(tf)
         if not ct:
@@ -266,8 +274,21 @@ def _root_child_columns(root, child_map):
         chosen = set(fieldnames or [])
         if not chosen:
             continue
-        for df in importable_fields(ct["child_doctype"]):
-            if df.fieldname in chosen or df.reqd:
+        fields = importable_fields(ct["child_doctype"])
+        # if a grid Link identifies the line (e.g. Product), the import can fill a
+        # required plain-text field (e.g. Product Name) from it — so don't clutter
+        # the sheet with that redundant column unless the user explicitly chose it.
+        has_list_link = any(f.fieldtype == "Link" and f.in_list_view for f in fields)
+        for df in fields:
+            # a required plain-text field the import auto-fills from the grid Link
+            # is redundant in the sheet — always drop it (the Link column covers it)
+            autofilled = (
+                has_list_link
+                and df.reqd
+                and not df.in_list_view
+                and df.fieldtype in autofill_text
+            )
+            if (df.fieldname in chosen or df.reqd or df.in_list_view) and not autofilled:
                 header = "{}: {}".format(ct["label"], df.label or df.fieldname)
                 out.append((tf, ct["child_doctype"], df, header))
     return out
@@ -282,12 +303,28 @@ def _link_placeholder(doctype, k=0):
     return "{} {}".format(doctype, k + 1)
 
 
+def _real_link_value(doctype, k=0):
+    """The k-th real record's display name for a link example, so a "Product"
+    column shows actual product names (e.g. "Table") instead of "CRM Product 1".
+    Returns None if there aren't enough real records to draw from."""
+    title = _title_field(doctype) or "name"
+    try:
+        names = frappe.get_all(
+            doctype, pluck=title, limit_page_length=k + 1, order_by="modified desc"
+        )
+    except Exception:
+        return None
+    return names[k] if k < len(names) else None
+
+
 def _example_value(df, k=0):
     """A friendly placeholder for an example cell. `k` varies the value across
     rows/line items so they look distinct (and link consistently)."""
     ft = df.fieldtype
     if ft == "Link" and df.options:
-        return _link_placeholder(df.options, k)
+        # prefer a real record name so the column reads naturally (e.g. a product
+        # name), falling back to a placeholder when there are no records yet
+        return _real_link_value(df.options, k) or _link_placeholder(df.options, k)
     if ft == "Int":
         return k + 1
     if ft in ("Float", "Currency", "Percent"):
@@ -327,7 +364,16 @@ def _write_example_rows(ws, root, parent_fields, child_cols):
     parent_fieldnames = [df.fieldname for df in parent_fields]
     primary_tf = child_cols[0][0]
     primary_dt = child_cols[0][1]
+    primary_label = child_cols[0][3].split(":")[0].strip()
     primary_fields = [df.fieldname for (tf, cd, df, h) in child_cols if tf == primary_tf]
+
+    # the column that ties a record's lines together (same as mapper.guess_group_key):
+    # the parent's naming/title field if present, else the first parent column.
+    title = _title_field(root)
+    if title in parent_fieldnames:
+        group_idx = parent_fieldnames.index(title)
+    else:
+        group_idx = 0 if parent_fieldnames else None
 
     parents = frappe.get_all(root, fields=["name"] + parent_fieldnames, limit_page_length=2) or [None]
     real_pool = (
@@ -357,8 +403,33 @@ def _write_example_rows(ws, root, parent_fields, child_cols):
             pvals.append(_fmt(v) if v not in (None, "") else _example_value(df, i))
         nlines = 3 if i == 0 else 1  # first parent shows the repeat
         for k in range(nlines):
-            ws.append(["example"] + pvals + child_cells(k))
+            if k == 0:
+                row_parent = list(pvals)
+            else:
+                # continuation line of the same record: keep ONLY the grouping
+                # column (that repeat is what ties the lines together); blank the
+                # rest so it reads as "same record, another line item".
+                row_parent = ["" for _ in pvals]
+                if group_idx is not None:
+                    row_parent[group_idx] = pvals[group_idx]
+            ws.append([SAMPLE_CELL] + row_parent + child_cells(k))
             n += 1
+
+    # explain the layout via header comments (headers themselves must stay exact
+    # so the importer can auto-map them)
+    if group_idx is not None:
+        gcell = ws.cell(row=1, column=2 + group_idx)  # +1 marker, +1 to 1-index
+        gcell.comment = Comment(
+            "Rows that share this value become ONE {} — repeat it on every line "
+            "of the same record.".format(root),
+            "Smart Import",
+        )
+    first_child_col = 2 + len(parent_fields)
+    ws.cell(row=1, column=first_child_col).comment = Comment(
+        "One {} line per row. Add more rows (repeating the grouping column) for "
+        "more lines on the same record.".format(primary_label),
+        "Smart Import",
+    )
     return n
 
 
@@ -428,6 +499,13 @@ def build_workbook(root, fields_map, included, mode="blank", filters=None, child
         if mode == "examples":
             headers = [reader.SAMPLE_COLUMN] + headers
         ws.append(headers)
+        if mode == "examples":
+            ws.cell(row=1, column=1).comment = Comment(
+                "These example rows show the format and are skipped automatically "
+                "on import.\n\nAdd your own rows below (leave this column blank), "
+                "or just delete the example rows.",
+                "Smart Import",
+            )
         # parent + child fields in column order, for the dropdown pass
         validation_fields = fields + [c[2] for c in child_cols]
 
@@ -453,14 +531,14 @@ def build_workbook(root, fields_map, included, mode="blank", filters=None, child
                 for rec in records:
                     row = [_fmt(rec.get(fn)) for fn in fieldnames]
                     if mode == "examples":
-                        row = ["example"] + row
+                        row = [SAMPLE_CELL] + row
                     ws.append(row)
                     datarows += 1
                 # examples: if the system has few/no records, still show the shape
                 # with placeholder rows (ignored on import via the marker column)
                 if mode == "examples" and datarows < 3:
                     for k in range(datarows, 3):
-                        ws.append(["example"] + _placeholder_row(dt, fields, k))
+                        ws.append([SAMPLE_CELL] + _placeholder_row(dt, fields, k))
                         datarows += 1
 
         sheets.append(

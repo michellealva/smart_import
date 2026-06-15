@@ -84,6 +84,21 @@ class TestImporterPure(unittest.TestCase):
         with self.assertRaises(importer.SkipRow):
             importer.resolve_link_cell("ghost@x", col, {"User": {}}, {"ghost@x": "__skip__"}, {})
 
+    def test_group_rows_fill_down_continuation(self):
+        # a blank group-key on a later row continues the record above (line items)
+        sheet = {
+            "headers": ["Org", "Item"],
+            "rows": [["Frappe", "Table"], [None, "Lego"], ["Acme", "Chair"]],
+        }
+        idx = importer.col_index_for(sheet)
+        groups = importer._group_rows(sheet, idx, "Org")
+        # Frappe gets both Table + Lego (fill-down); Acme is its own
+        self.assertEqual(len(groups), 2)
+        self.assertEqual([r[1][1] for r in groups[0][1]], ["Table", "Lego"])
+        self.assertEqual([r[1][1] for r in groups[1][1]], ["Chair"])
+        # with no group key, every row is its own record
+        self.assertEqual(len(importer._group_rows(sheet, idx, "")), 3)
+
     def test_resolve_link_cell_strict_no_fuzzy_no_autocreate(self):
         col = {"link_doctype": "User"}
         m = {"real@x": "Real User"}
@@ -276,6 +291,30 @@ class TestTemplate(unittest.TestCase):
         # ToDo.priority is a Select field -> should get a data-validation dropdown
         wb = load_workbook(BytesIO(template.build_workbook("ToDo", {"ToDo": ["priority"]}, [], "blank", {})))
         self.assertTrue(list(wb["ToDo"].data_validations.dataValidation))
+
+    def test_examples_child_table_groups_and_blanks_continuation(self):
+        # examples for a doctype with a child table: the grouping column repeats
+        # across a record's lines; other parent columns blank on continuation
+        wb = load_workbook(
+            BytesIO(
+                template.build_workbook(
+                    "User",
+                    {"User": ["first_name", "last_name"]},
+                    [],
+                    "examples",
+                    None,
+                    {"roles": ["role"]},
+                )
+            )
+        )
+        ws = wb["User"]
+        # col 1 = marker (with a comment), col 2 = grouping (first_name), col 3 = last_name
+        self.assertEqual(ws.cell(1, 1).value, reader.SAMPLE_COLUMN)
+        self.assertIsNotNone(ws.cell(1, 1).comment)
+        # rows 2..4 are the first record's 3 lines
+        self.assertTrue(ws.cell(2, 2).value)  # grouping value present
+        self.assertEqual(ws.cell(3, 2).value, ws.cell(2, 2).value)  # repeated on continuation
+        self.assertIn(ws.cell(3, 3).value, (None, ""))  # non-key parent blanked on continuation
 
     def test_plan_shape(self):
         p = template.plan("Role")

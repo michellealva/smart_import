@@ -558,6 +558,13 @@
           </p>
         </div>
 
+        <div v-if="notes.length" class="mt-5">
+          <p class="mb-2 text-sm font-medium text-gray-900">Notes</p>
+          <div class="space-y-1 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
+            <p v-for="(n, i) in notes" :key="i" class="text-xs text-gray-600">{{ n.message }}</p>
+          </div>
+        </div>
+
         <div v-if="visibleLog.length" class="mt-5">
           <p class="mb-2 text-sm font-medium text-gray-900">
             Issues <span class="font-normal text-gray-500">· {{ logCount }}</span>
@@ -1137,8 +1144,12 @@ const finishedSubtitle = computed(() => {
   return 'Details below. You can fix the file and try again.'
 })
 
-const visibleLog = computed(() => (liveStatus.value.log || []).slice(0, 50))
-const logCount = computed(() => (liveStatus.value.log || []).length)
+// real issues = rows skipped or that errored; "info" entries (e.g. "created N
+// records automatically") are positive notes, shown separately — not issues.
+const issueLog = computed(() => (liveStatus.value.log || []).filter((e) => e.type !== 'info'))
+const visibleLog = computed(() => issueLog.value.slice(0, 50))
+const logCount = computed(() => issueLog.value.length)
+const notes = computed(() => (liveStatus.value.log || []).filter((e) => e.type === 'info'))
 const expandedLog = reactive({})
 function toggleLog(i) {
   expandedLog[i] = !expandedLog[i]
