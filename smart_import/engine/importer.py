@@ -73,18 +73,26 @@ def _group_rows(sheet, idx, group_key):
     """Group a flattened sheet's rows into one parent record each.
 
     Rows sharing the same (case-insensitive) value in `group_key` become one
-    group, in first-seen order. Rows with a blank key — or no key column — each
-    become their own group, so nothing is silently merged.
+    group, in first-seen order. When there IS a group-key column, a row whose
+    key is blank is treated as a continuation line of the record above
+    (fill-down) — so the natural "fill the key once, leave it blank on the next
+    line item" pattern groups correctly. With no group-key column, each row is
+    its own record.
     """
     gi = idx.get(group_key) if group_key else None
     groups = []
     pos = {}
+    last_key = None
     blank = 0
     for n, row in enumerate(sheet["rows"], start=2):
         kv = cell(row, gi) if gi is not None else None
         ks = str(kv).strip().lower() if kv is not None else ""
         if ks:
             key = ks
+            last_key = ks
+        elif gi is not None and last_key is not None:
+            # blank key after a filled one = another line of the same record
+            key = last_key
         else:
             key = "\x00blank{}".format(blank)
             blank += 1
@@ -694,9 +702,53 @@ def _build_values(e, grows, idx, parent_cols, child_cols, value_decisions, resol
             if d:
                 tables.setdefault(tf, []).append(d)
     for tf, rows_list in tables.items():
+        _autofill_required_text(e["doctype"], tf, rows_list)
         values[tf] = rows_list
 
     return values
+
+
+_AUTOFILL_TEXT = ("Data", "Small Text", "Text", "Long Text")
+
+
+def _autofill_required_text(parent_doctype, table_fieldname, lines):
+    """Fill a child line's empty REQUIRED plain-text field from a Link it carries.
+
+    Lets a single grid Link column (e.g. a Product line's `product_code`) satisfy
+    a separate required text field (e.g. `product_name`) that the doctype doesn't
+    auto-fetch — so the user needs only one column. Generic and unambiguous: only
+    when the line has a set Link and the text field is otherwise empty.
+    """
+    try:
+        child_dt = frappe.get_meta(parent_doctype).get_field(table_fieldname).options
+        cmeta = frappe.get_meta(child_dt)
+    except Exception:
+        return
+    reqd_text = [
+        f.fieldname
+        for f in cmeta.fields
+        if f.reqd and f.fieldtype in _AUTOFILL_TEXT
+    ]
+    link_fields = [
+        (f.fieldname, f.options) for f in cmeta.fields if f.fieldtype == "Link"
+    ]
+    if not reqd_text or not link_fields:
+        return
+    for line in lines:
+        src_val = src_dt = None
+        for fn, dt in link_fields:
+            if line.get(fn):
+                src_val, src_dt = line[fn], dt
+                break
+        if not src_val:
+            continue
+        title_field = get_title_fieldname(src_dt)
+        title = (
+            frappe.db.get_value(src_dt, src_val, title_field) if title_field else None
+        )
+        for fn in reqd_text:
+            if not line.get(fn):
+                line[fn] = title or src_val
 
 
 def _collect_value_decisions(issues, decisions):

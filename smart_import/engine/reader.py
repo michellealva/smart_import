@@ -9,7 +9,9 @@ import frappe
 # A column we add to "example rows" templates. Any row that still has a value
 # in this column is treated as sample data and silently ignored on import, so
 # users don't have to delete the examples we gave them.
-SAMPLE_COLUMN = "Example rows — ignored on import (delete this column)"
+SAMPLE_COLUMN = "⚠ Example rows — auto-skipped on import (add your data below)"
+# earlier header text, still recognised so older downloaded templates import.
+LEGACY_SAMPLE_COLUMNS = {"example rows — ignored on import (delete this column)"}
 
 # Hidden sheet that holds dropdown lookup values in generated templates. It is
 # never imported — skipped on read.
@@ -26,7 +28,8 @@ def _strip_sample_rows(sheet):
     headers = sheet["headers"]
     marker = None
     for i, h in enumerate(headers):
-        if str(h).strip().lower() == SAMPLE_COLUMN.lower():
+        hl = str(h).strip().lower()
+        if hl == SAMPLE_COLUMN.lower() or hl in LEGACY_SAMPLE_COLUMNS:
             marker = i
             break
     if marker is None:

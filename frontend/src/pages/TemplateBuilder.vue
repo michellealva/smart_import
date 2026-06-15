@@ -59,9 +59,10 @@
             class="relative rounded-xl border bg-white"
             :class="dt === selectedDoctype ? 'border-blue-300' : 'border-gray-200'"
           >
-            <!-- vertical connector to the next step -->
+            <!-- vertical connector to the next step (hidden while expanded so it
+                 doesn't run through the column picker) -->
             <span
-              v-if="i < orderedTabs.length - 1"
+              v-if="i < orderedTabs.length - 1 && !isOpen(dt)"
               class="absolute left-[31px] top-[42px] -bottom-3 w-px bg-gray-200"
             />
             <div class="flex items-start gap-3 px-4 py-3">
@@ -124,29 +125,18 @@
             <Badge theme="blue" label="Importing this" />
           </div>
 
-          <!-- linked records, drawn as a connected tree -->
+          <!-- linked records, indented by depth so nesting reads clearly -->
           <div class="mt-1">
             <div
               v-for="node in treeRows"
               :key="node.doctype"
-              class="relative flex items-center gap-2 py-1.5 text-sm"
-              :style="{ paddingLeft: (node.depth + 1) * 22 + 'px' }"
+              class="flex items-center gap-2 py-1.5 text-sm"
+              :style="{ paddingLeft: node.depth * 24 + 'px' }"
             >
-              <!-- connector guides: a rail per depth level + an elbow into the node -->
-              <span
-                v-for="d in node.depth + 1"
-                :key="d"
-                class="absolute top-0 bottom-0 w-px bg-gray-200"
-                :style="{ left: d * 22 - 11 + 'px' }"
-              />
-              <FeatherIcon
-                name="corner-down-right"
-                class="-ml-1 h-3.5 w-3.5 shrink-0 text-gray-300"
-                :style="{ marginLeft: '-' + (node.depth * 22 + 4) + 'px' }"
-              />
+              <!-- expand toggle, or a fixed-width spacer so labels line up -->
               <button
                 v-if="node.hasChildren"
-                class="text-gray-400 hover:text-gray-700"
+                class="shrink-0 text-gray-400 hover:text-gray-700"
                 @click="toggleTreeExpand(node.doctype)"
               >
                 <FeatherIcon
@@ -154,21 +144,24 @@
                   class="h-3.5 w-3.5"
                 />
               </button>
+              <FeatherIcon
+                v-else
+                name="corner-down-right"
+                class="h-3.5 w-3.5 shrink-0 text-gray-300"
+              />
               <span class="text-xs text-gray-400">{{ node.via_label }}</span>
               <span
                 :class="includedSet.has(node.doctype) ? 'font-medium text-gray-900' : 'text-gray-600'"
               >
                 {{ labelOf(node.doctype) }}
               </span>
-              <Badge v-if="forcedSet.has(node.doctype)" theme="orange" label="required" />
-              <Button
-                v-else
-                size="sm"
-                :variant="includedSet.has(node.doctype) ? 'subtle' : 'outline'"
-                :theme="includedSet.has(node.doctype) ? 'green' : 'gray'"
-                :label="includedSet.has(node.doctype) ? 'Included' : 'Add'"
-                @click="toggleInclude(node.doctype)"
+              <!-- include toggle: a checkbox; required records are checked + locked -->
+              <Checkbox
+                :modelValue="forcedSet.has(node.doctype) || includedSet.has(node.doctype)"
+                :disabled="forcedSet.has(node.doctype)"
+                @update:modelValue="() => toggleInclude(node.doctype)"
               />
+              <Badge v-if="forcedSet.has(node.doctype)" theme="orange" label="required" />
             </div>
           </div>
         </div>
@@ -543,6 +536,10 @@ function explanation(dt) {
   }
   const edge = linkEdge(dt)
   if (!edge) return 'A related list included in your workbook.'
+  if (edge.via_table) {
+    // reached through a line-item table (e.g. CRM Deal's Products link to CRM Product)
+    return `${edge.from_doctype}'s ${edge.via_label} line items link to ${dt}, so your ${dt} records must exist before the import can match them up.`
+  }
   return `Each ${edge.from_doctype} links to a ${edge.via_label}, so your ${dt} records have to exist before the import can match them up.`
 }
 
