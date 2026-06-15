@@ -144,10 +144,49 @@ def _field_key(c):
     return "{}.{}".format(tf, c["field"]) if tf else c["field"]
 
 
+def auto_creatable(doctype, cache=None):
+    """Can a record of `doctype` be created from just a name/title?
+
+    Decided by a trial insert that is immediately rolled back (with mandatory
+    checks bypassed and notifications suppressed). Simple masters (Lead Source,
+    CRM Organization, …) pass; doctypes that need real data — e.g. User, which
+    requires email + first_name — fail. Used to decide whether to offer
+    "Create automatically" for a missing Link value.
+    """
+    if cache is not None and doctype in cache:
+        return cache[doctype]
+
+    ok = False
+    prev_in_import = frappe.flags.in_import
+    frappe.flags.in_import = True  # suppress welcome mails / notifications
+    frappe.db.savepoint("si_creatable_probe")
+    try:
+        title_field = get_title_fieldname(doctype)
+        rec = frappe.new_doc(doctype)
+        if title_field:
+            rec.set(title_field, "Smart Import check")
+        else:
+            rec.name = "Smart Import check"
+        rec.flags.ignore_permissions = True
+        rec.flags.ignore_mandatory = True
+        rec.insert()
+        ok = True
+    except Exception:
+        ok = False
+    finally:
+        frappe.db.rollback(save_point="si_creatable_probe")
+        frappe.flags.in_import = prev_in_import
+
+    if cache is not None:
+        cache[doctype] = ok
+    return ok
+
+
 def validate(spec, data):
     sheets = {s["name"]: s for s in data["sheets"]}
     issues = []
     entity_reports = []
+    creatable_cache = {}
 
     for e in spec["entities"]:
         if not e["doctype"] or e["sheet"] not in sheets:
@@ -289,6 +328,28 @@ def validate(spec, data):
                     missing.append(v)
 
                 if missing:
+                    # only offer "Create automatically" for doctypes that can
+                    # actually be made from a value (not User, etc.)
+                    creatable = auto_creatable(target, creatable_cache)
+                    choices = []
+                    if creatable:
+                        choices.append(
+                            {"label": "Create automatically", "value": "__create__"}
+                        )
+                    choices += [
+                        {"label": "Leave blank", "value": "__blank__"},
+                        {"label": "Skip these rows", "value": "__skip__"},
+                        {"label": "Type an existing value…", "value": "__manual__"},
+                    ]
+                    message = (
+                        '{} value(s) in column "{}" don\'t exist yet as {} records.'
+                    ).format(len(missing), c["column"], target)
+                    if not creatable:
+                        message += (
+                            " {} can't be created automatically — pick an existing one,"
+                            " leave blank, or skip those rows."
+                        ).format(target)
+                    suggestion = "__create__" if creatable else "__blank__"
                     issues.append(
                         {
                             "id": "{}:{}:missing_links".format(e["id"], fkey),
@@ -301,18 +362,12 @@ def validate(spec, data):
                             "table_fieldname": c.get("table_fieldname"),
                             "fieldtype": "Link",
                             "target_doctype": target,
+                            "creatable": creatable,
                             "count": len(missing),
-                            "message": (
-                                '{} value(s) in column "{}" don\'t exist yet as {} records.'
-                            ).format(len(missing), c["column"], target),
-                            "choices": [
-                                {"label": "Create automatically", "value": "__create__"},
-                                {"label": "Leave blank", "value": "__blank__"},
-                                {"label": "Skip these rows", "value": "__skip__"},
-                                {"label": "Type a value…", "value": "__manual__"},
-                            ],
+                            "message": message,
+                            "choices": choices,
                             "values": [
-                                {"value": v, "count": counts[v], "suggestion": "__create__"}
+                                {"value": v, "count": counts[v], "suggestion": suggestion}
                                 for v in missing[:MAX_ISSUE_VALUES]
                             ],
                         }
@@ -504,7 +559,10 @@ def resolve_link_cell(raw, col, link_maps, vd, created_counts):
         name = _create_link(target, raw, link_maps, created_counts)
         if name:
             return name
-        raise ValueError('Could not find or create "{}" in {}.'.format(raw, target))
+        raise ValueError(
+            'Could not create "{}" as a {} record — that doctype needs more than '
+            "a name.".format(raw, target)
+        )
 
     # otherwise the choice is a literal replacement (chosen record or typed)
     replacement = str(choice).strip()
@@ -514,7 +572,10 @@ def resolve_link_cell(raw, col, link_maps, vd, created_counts):
     name = _create_link(target, replacement, link_maps, created_counts)
     if name:
         return name
-    raise ValueError('Could not find or create "{}" in {}.'.format(replacement, target))
+    raise ValueError(
+        'Could not create "{}" as a {} record — that doctype needs more than '
+        "a name.".format(replacement, target)
+    )
 
 
 def resolve_select_cell(raw, col, vd):
@@ -541,6 +602,215 @@ def resolve_select_cell(raw, col, vd):
     if replacement.lower() in opt_lower:
         return opt_lower[replacement.lower()]
     return replacement
+
+
+def _build_values(e, grows, idx, parent_cols, child_cols, value_decisions, resolve_one):
+    """Turn a group of source rows into a record's field values.
+
+    Shared by the real import and the dry-run recheck so both behave identically.
+    `resolve_one(col, raw)` does the per-cell resolution (real or simulated).
+    Raises SkipRow when a user decision says to skip the row.
+    """
+    values = {"doctype": e["doctype"]}
+
+    # parent fields: first non-empty cell across the group's rows
+    for col in parent_cols:
+        ci = idx.get(col["column"])
+        raw = next(
+            (cell(r, ci) for _, r in grows if not is_blank(cell(r, ci))),
+            None,
+        )
+        if is_blank(raw):
+            # honour the user's decision for a blank required field
+            vd = value_decisions.get(
+                (e["id"], col.get("table_fieldname"), col["field"]), {}
+            )
+            choice = vd.get("")
+            if choice == "__skip__":
+                raise SkipRow(
+                    'Row skipped — no value for required field "{}".'.format(
+                        col.get("label") or col["field"]
+                    )
+                )
+            if choice and choice not in ("__blank__", "__manual__"):
+                raw = choice  # a chosen option or typed value
+            else:
+                continue
+        v = resolve_one(col, raw)
+        if v is not None:
+            values[col["field"]] = v
+
+    # child rows: one line per source row, grouped by table field
+    tables = {}
+    for _, r in grows:
+        per_table = {}
+        skip_line = False
+        for col in child_cols:
+            raw = cell(r, idx.get(col["column"]))
+            if is_blank(raw):
+                continue
+            try:
+                v = resolve_one(col, raw)
+            except SkipRow:
+                skip_line = True  # "skip these rows" drops the whole line
+                break
+            if v is not None:
+                per_table.setdefault(col["table_fieldname"], {})[col["field"]] = v
+        if skip_line:
+            continue
+        for tf, d in per_table.items():
+            if d:
+                tables.setdefault(tf, []).append(d)
+    for tf, rows_list in tables.items():
+        values[tf] = rows_list
+
+    return values
+
+
+def _collect_value_decisions(issues, decisions):
+    """value_decisions[(entity, table_fieldname, field)] = {value_lower: choice}.
+
+    A choice is a sentinel (__create__/__blank__/__skip__) or a literal value
+    (a chosen option/record, or a manually typed value). Untouched values fall
+    back to their suggested choice.
+    """
+    value_decisions = {}
+    for iid, issue in issues.items():
+        if issue.get("type") not in ("link_values", "select_values", "missing_values"):
+            continue
+        key = (issue["entity"], issue.get("table_fieldname"), issue["field"])
+        vd = value_decisions.setdefault(key, {})
+        for val, choice in (decisions.get(iid) or {}).items():
+            vd[str(val).strip().lower()] = choice
+        for entry in issue.get("values", []):
+            v = str(entry["value"]).strip().lower()
+            vd.setdefault(v, entry.get("suggestion"))
+    return value_decisions
+
+
+def recheck(session, decisions=None):
+    """Dry-run: apply the user's fixes and report what would happen — without
+    creating any records. Powers the "Recheck" button in the Fix-issues step."""
+    from smart_import.engine import reader
+
+    decisions = decisions or {}
+    doc = frappe.get_doc("Smart Import Session", session)
+    data = reader.read_file(doc.source_file)
+    spec = json.loads(doc.spec or "{}")
+    issues = {i["id"]: i for i in json.loads(doc.issues or "{}").get("issues", [])}
+    sheets = {s["name"]: s for s in data["sheets"]}
+
+    value_decisions = _collect_value_decisions(issues, decisions)
+    link_maps = {}
+    created_counts = {}
+    would_import = would_skip = 0
+    problems = []
+
+    active = [e for e in spec["entities"] if e["doctype"] and e["sheet"] in sheets]
+    for e in active:
+        sheet = sheets[e["sheet"]]
+        idx = col_index_for(sheet)
+        meta = frappe.get_meta(e["doctype"])
+        required_labels = {
+            df.fieldname: (df.label or df.fieldname)
+            for df in meta.fields
+            if df.reqd
+            and not df.default
+            and df.fieldtype not in ("Table", "Table MultiSelect")
+            and not df.fetch_from
+        }
+        parent_cols = [c for c in e["columns"] if c.get("target") != "child"]
+        child_cols = [c for c in e["columns"] if c.get("target") == "child"]
+        for col in e["columns"]:
+            t = col.get("link_doctype")
+            if t and t not in link_maps:
+                link_maps[t] = load_link_map(t)
+
+        def resolve_one_dry(col, raw, _e=e):
+            vd = value_decisions.get(
+                (_e["id"], col.get("table_fieldname"), col["field"]), {}
+            )
+            if col.get("link_doctype"):
+                # dry link resolution — never actually creates a record. "Create
+                # automatically" is only offered for creatable targets, so an
+                # un-matched __create__/typed value is assumed to resolve.
+                target = col["link_doctype"]
+                link_maps.setdefault(target, load_link_map(target))
+                m = link_maps[target]
+                existing = _match_existing(m, raw)
+                if existing:
+                    return existing
+                choice = vd.get(str(raw).strip().lower())
+                if choice == "__blank__":
+                    return None
+                if choice == "__skip__":
+                    raise SkipRow(
+                        '"{}" doesn\'t exist in {} — row skipped as you chose.'.format(
+                            raw, target
+                        )
+                    )
+                if choice in (None, "__create__", ""):
+                    return str(raw).strip()
+                replacement = str(choice).strip()
+                return _match_existing(m, replacement) or replacement
+            if col.get("fieldtype") == "Select":
+                val = resolve_select_cell(raw, col, vd)
+                opts = col.get("select_options") or []
+                if (
+                    val is not None
+                    and opts
+                    and str(val).strip().lower() not in {o.strip().lower() for o in opts}
+                ):
+                    raise ValueError(
+                        '"{}" isn\'t a valid option for {}.'.format(
+                            val, col.get("label") or col["field"]
+                        )
+                    )
+                return val
+            return coerce(col, raw)
+
+        if child_cols:
+            groups = _group_rows(sheet, idx, e.get("group_key") or "")
+        else:
+            groups = [(None, [(n, row)]) for n, row in enumerate(sheet["rows"], start=2)]
+
+        for _key, grows in groups:
+            first_n = grows[0][0]
+            try:
+                values = _build_values(
+                    e, grows, idx, parent_cols, child_cols, value_decisions, resolve_one_dry
+                )
+            except SkipRow:
+                would_skip += 1
+                continue
+            except Exception as ex:
+                problems.append(
+                    {
+                        "sheet": e["sheet"],
+                        "row": first_n,
+                        "reason": (str(ex).strip().splitlines() or ["This row can't be imported."])[0][:200],
+                    }
+                )
+                continue
+            missing = [lbl for fn, lbl in required_labels.items() if fn not in values]
+            if missing:
+                problems.append(
+                    {
+                        "sheet": e["sheet"],
+                        "row": first_n,
+                        "reason": "Still missing required: " + ", ".join(missing),
+                    }
+                )
+            else:
+                would_import += 1
+
+    return {
+        "ok": not problems,
+        "would_import": would_import,
+        "would_skip": would_skip,
+        "would_fail": len(problems),
+        "problems": problems[:MAX_ISSUE_VALUES],
+    }
 
 
 def set_progress(session, payload):
@@ -576,25 +846,7 @@ def run_import(session, decisions=None):
         created_counts = {}
 
         # Step 1 — collect the user's per-value decisions for each flagged field.
-        # value_decisions[(entity_id, field)] = {value_lower: choice}, where a
-        # choice is a sentinel (__create__/__blank__/__skip__) or a literal
-        # replacement value (a chosen option/record, or a manually typed value).
-        value_decisions = {}
-        for iid, issue in issues.items():
-            if issue.get("type") not in (
-                "link_values",
-                "select_values",
-                "missing_values",
-            ):
-                continue
-            key = (issue["entity"], issue.get("table_fieldname"), issue["field"])
-            vd = value_decisions.setdefault(key, {})
-            for val, choice in (decisions.get(iid) or {}).items():
-                vd[str(val).strip().lower()] = choice
-            # fall back to the suggested choice for values the user left untouched
-            for entry in issue.get("values", []):
-                v = str(entry["value"]).strip().lower()
-                vd.setdefault(v, entry.get("suggestion"))
+        value_decisions = _collect_value_decisions(issues, decisions)
 
         # Step 2 — import each sheet in dependency order
         active = [
@@ -657,66 +909,9 @@ def run_import(session, decisions=None):
                 first_n = grows[0][0]
                 frappe.db.savepoint(SAVEPOINT)
                 try:
-                    values = {"doctype": e["doctype"]}
-                    # parent fields: first non-empty cell across the group's rows
-                    for col in parent_cols:
-                        ci = idx.get(col["column"])
-                        raw = next(
-                            (
-                                cell(r, ci)
-                                for _, r in grows
-                                if not is_blank(cell(r, ci))
-                            ),
-                            None,
-                        )
-                        if is_blank(raw):
-                            # honour the user's decision for a blank required
-                            # field (skip the row, or fill a chosen/typed value)
-                            vd = value_decisions.get(
-                                (e["id"], col.get("table_fieldname"), col["field"]),
-                                {},
-                            )
-                            choice = vd.get("")
-                            if choice == "__skip__":
-                                raise SkipRow(
-                                    'Row skipped — no value for required field "{}".'.format(
-                                        col.get("label") or col["field"]
-                                    )
-                                )
-                            if choice and choice not in ("__blank__", "__manual__"):
-                                raw = choice  # a chosen option or typed value
-                            else:
-                                continue
-                        v = resolve_one(col, raw)
-                        if v is not None:
-                            values[col["field"]] = v
-
-                    # child rows: one line per source row, grouped by table field
-                    tables = {}
-                    for _, r in grows:
-                        per_table = {}
-                        skip_line = False
-                        for col in child_cols:
-                            raw = cell(r, idx.get(col["column"]))
-                            if is_blank(raw):
-                                continue
-                            try:
-                                v = resolve_one(col, raw)
-                            except SkipRow:
-                                skip_line = True  # "skip these rows" drops the whole line
-                                break
-                            if v is not None:
-                                per_table.setdefault(col["table_fieldname"], {})[
-                                    col["field"]
-                                ] = v
-                        if skip_line:
-                            continue
-                        for tf, d in per_table.items():
-                            if d:
-                                tables.setdefault(tf, []).append(d)
-                    for tf, rows_list in tables.items():
-                        values[tf] = rows_list
-
+                    values = _build_values(
+                        e, grows, idx, parent_cols, child_cols, value_decisions, resolve_one
+                    )
                     rec = frappe.get_doc(values)
                     rec.insert()
                     imported += 1

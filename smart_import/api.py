@@ -275,6 +275,16 @@ def validate(session):
 
 
 @frappe.whitelist()
+def recheck(session, decisions=None):
+    """Dry-run with the user's fixes applied — reports what would import / be
+    skipped / still fail, without creating any records."""
+    _get_session(session)
+    if isinstance(decisions, str):
+        decisions = json.loads(decisions or "{}")
+    return importer.recheck(session, decisions or {})
+
+
+@frappe.whitelist()
 def start_import(session, decisions=None):
     doc = _get_session(session)
     if isinstance(decisions, str):
